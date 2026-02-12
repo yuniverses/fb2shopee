@@ -1,0 +1,23 @@
+{
+  "name": "fb2shopee-extension",
+  "version": "0.1.0",
+  "private": true,
+  "description": "FB group post to Shopee listing assistant",
+  "scripts": {
+    "build": "node ./scripts/build.mjs",
+    "watch": "node ./scripts/build.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.1.36",
+    "@types/node": "^25.2.3",
+    "esbuild": "^0.27.3",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
+  }
+}

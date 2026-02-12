@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FB2Shopee</title>
+    <style>
+      :root {
+        --bg: #f7f7f0;
+        --surface: #fffdf8;
+        --text: #1f2d1f;
+        --text-muted: #5a685a;
+        --border: #d5dccf;
+        --primary: #0f766e;
+        --primary-hover: #115e59;
+        --secondary: #334155;
+        --focus: #0ea5e9;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        width: 360px;
+        background:
+          radial-gradient(circle at 0 0, #e6efe1 0, transparent 34%),
+          radial-gradient(circle at 100% 100%, #e1ecef 0, transparent 38%),
+          var(--bg);
+        color: var(--text);
+        font-family: "IBM Plex Sans", "Segoe UI", Helvetica, Arial, sans-serif;
+      }
+      .container {
+        padding: 14px;
+        min-height: 320px;
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 15px;
+        line-height: 1.4;
+        letter-spacing: 0.2px;
+      }
+      .row {
+        display: flex;
+        gap: 8px;
+        margin-top: 8px;
+      }
+      button {
+        appearance: none;
+        border: 1px solid transparent;
+        border-radius: 10px;
+        background: var(--primary);
+        color: #ffffff;
+        font-size: 12px;
+        font-weight: 600;
+        padding: 10px 12px;
+        min-height: 44px;
+        cursor: pointer;
+        flex: 1;
+        transition: background-color 120ms ease, transform 120ms ease;
+      }
+      button:hover { background: var(--primary-hover); }
+      button:active { transform: translateY(1px); }
+      button.secondary { background: var(--secondary); }
+      button.secondary:hover { background: #253140; }
+      button:disabled {
+        opacity: 0.65;
+        cursor: not-allowed;
+      }
+      button:focus-visible,
+      .link:focus-visible {
+        outline: 3px solid var(--focus);
+        outline-offset: 2px;
+      }
+      .status {
+        margin-top: 10px;
+        border-radius: 10px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        min-height: 56px;
+        padding: 10px;
+        font-size: 11px;
+        line-height: 1.5;
+        white-space: pre-wrap;
+      }
+      .progress {
+        margin-top: 8px;
+        border-radius: 10px;
+        background: #f2f6ef;
+        border: 1px solid #c8d2bf;
+        padding: 8px;
+      }
+      .progress-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 11px;
+        color: #314131;
+        margin-bottom: 6px;
+      }
+      .progress-track {
+        width: 100%;
+        height: 10px;
+        border-radius: 999px;
+        background: #dde7d4;
+        overflow: hidden;
+      }
+      .progress-fill {
+        width: 0%;
+        height: 100%;
+        border-radius: 999px;
+        background: linear-gradient(90deg, #0f766e, #0b8f84);
+        transition: width 260ms ease;
+      }
+      .progress-fill.running {
+        background:
+          repeating-linear-gradient(
+            -45deg,
+            #0f766e,
+            #0f766e 8px,
+            #149f93 8px,
+            #149f93 16px
+          );
+        background-size: 24px 24px;
+        animation: progress-stripe 700ms linear infinite;
+      }
+      .progress-fill.error {
+        background: linear-gradient(90deg, #b91c1c, #ef4444);
+      }
+      .progress-fill.done {
+        background: linear-gradient(90deg, #166534, #16a34a);
+      }
+      .meta {
+        margin-top: 8px;
+        color: var(--text-muted);
+        font-size: 11px;
+        line-height: 1.45;
+      }
+      .debug {
+        margin-top: 8px;
+        border-radius: 10px;
+        border: 1px dashed #bfc9b4;
+        background: #f7faf4;
+        font-size: 10px;
+        line-height: 1.45;
+        color: #33413a;
+        min-height: 64px;
+        max-height: 180px;
+        overflow: auto;
+        white-space: pre-wrap;
+        padding: 8px;
+      }
+      .image-preview {
+        margin-top: 8px;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        padding: 8px;
+        display: none;
+      }
+      .image-preview.visible { display: block; }
+      .image-preview-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 6px;
+      }
+      .image-preview-title {
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--text);
+      }
+      .image-preview-count {
+        font-size: 10px;
+        color: var(--text-muted);
+      }
+      .image-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(64px, 1fr));
+        gap: 4px;
+      }
+      .image-grid-item {
+        position: relative;
+        aspect-ratio: 1;
+        border-radius: 6px;
+        overflow: hidden;
+        border: 1px solid #e0e5db;
+        background: #f0f3ec;
+      }
+      .image-grid-item img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+      }
+      .image-grid-item .idx {
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        background: rgba(0,0,0,0.6);
+        color: #fff;
+        font-size: 9px;
+        font-weight: 600;
+        padding: 1px 4px;
+        border-radius: 4px;
+        line-height: 1.3;
+      }
+      .image-grid-item .fail {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 100%;
+        height: 100%;
+        font-size: 9px;
+        color: var(--text-muted);
+        text-align: center;
+        padding: 4px;
+      }
+      .link {
+        margin-top: 8px;
+        display: inline-block;
+        color: #0b5da9;
+        font-size: 11px;
+        text-decoration: none;
+      }
+      .link:hover { text-decoration: underline; }
+      @media (prefers-reduced-motion: reduce) {
+        button { transition: none; }
+        .progress-fill { transition: none; }
+        .progress-fill.running { animation: none; }
+      }
+      @keyframes progress-stripe {
+        0% { background-position: 0 0; }
+        100% { background-position: 24px 0; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>FB → Shopee Auto Fill</h1>
+      <div class="row">
+        <button id="runPipeline">Run One-Click</button>
+        <button id="collectOnly" class="secondary">Collect FB</button>
+      </div>
+      <div class="row">
+        <button id="openShopee" class="secondary">Open Shopee</button>
+        <button id="openOptions" class="secondary">API Key</button>
+      </div>
+      <div class="status" id="status" role="status" aria-live="polite">Idle</div>
+      <div class="progress" aria-live="polite">
+        <div class="progress-head">
+          <span id="progressLabel">Waiting</span>
+          <span id="progressValue">0%</span>
+        </div>
+        <div class="progress-track">
+          <div class="progress-fill" id="progressFill"></div>
+        </div>
+      </div>
+      <div class="meta" id="meta" aria-live="polite"></div>
+      <div class="image-preview" id="imagePreview">
+        <div class="image-preview-head">
+          <span class="image-preview-title">FB 抓取圖片</span>
+          <span class="image-preview-count" id="imageCount"></span>
+        </div>
+        <div class="image-grid" id="imageGrid"></div>
+      </div>
+      <div class="debug" id="debug" aria-live="polite">No debug logs yet.</div>
+      <a class="link" href="options.html" target="_blank">Open settings</a>
+    </div>
+    <script src="popup.js"></script>
+  </body>
+</html>

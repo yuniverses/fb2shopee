@@ -1,0 +1,37 @@
+{
+  "manifest_version": 3,
+  "name": "FB2Shopee Auto Listing",
+  "version": "0.1.0",
+  "description": "Import FB group post content into Shopee listing with AI assistance.",
+  "permissions": ["storage", "tabs", "activeTab", "scripting"],
+  "host_permissions": [
+    "https://www.facebook.com/*",
+    "https://seller.shopee.tw/*",
+    "https://api.openai.com/*",
+    "https://*.fbcdn.net/*",
+    "https://*.fna.fbcdn.net/*",
+    "https://*.xx.fbcdn.net/*",
+    "https://scontent.*.fbcdn.net/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "FB2Shopee",
+    "default_popup": "popup.html"
+  },
+  "options_page": "options.html",
+  "content_scripts": [
+    {
+      "matches": ["https://www.facebook.com/groups/*"],
+      "js": ["content-facebook.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://seller.shopee.tw/*"],
+      "js": ["content-shopee.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

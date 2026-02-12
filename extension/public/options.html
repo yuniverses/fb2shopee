@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FB2Shopee Settings</title>
+    <style>
+      :root {
+        --bg: #f7f7f0;
+        --surface: #fffdf8;
+        --text: #1f2d1f;
+        --muted: #566356;
+        --border: #d5dccf;
+        --primary: #0f766e;
+        --primary-hover: #115e59;
+        --secondary: #334155;
+        --focus: #0ea5e9;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 24px;
+        background:
+          radial-gradient(circle at 20% 0%, #dfe9d8 0, transparent 40%),
+          radial-gradient(circle at 100% 100%, #e2ecef 0, transparent 35%),
+          var(--bg);
+        color: var(--text);
+        font-family: "IBM Plex Sans", "Segoe UI", Helvetica, Arial, sans-serif;
+      }
+      .card {
+        max-width: 760px;
+        margin: 0 auto;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 20px;
+      }
+      h1 {
+        margin: 0;
+        font-size: 22px;
+        line-height: 1.35;
+      }
+      label {
+        display: block;
+        margin: 14px 0 6px;
+        font-weight: 600;
+      }
+      input {
+        width: 100%;
+        border: 1px solid #bdcab3;
+        border-radius: 10px;
+        padding: 10px 12px;
+        min-height: 44px;
+        font-size: 14px;
+        color: var(--text);
+        background: #ffffff;
+      }
+      input:focus-visible,
+      button:focus-visible {
+        outline: 3px solid var(--focus);
+        outline-offset: 2px;
+      }
+      .row {
+        display: flex;
+        gap: 8px;
+        margin-top: 14px;
+      }
+      button {
+        border: 1px solid transparent;
+        border-radius: 10px;
+        min-height: 44px;
+        padding: 10px 14px;
+        background: var(--primary);
+        color: #ffffff;
+        font-weight: 600;
+        cursor: pointer;
+        transition: background-color 120ms ease;
+      }
+      button:hover { background: var(--primary-hover); }
+      button.secondary {
+        background: var(--secondary);
+      }
+      button.secondary:hover {
+        background: #253140;
+      }
+      button:disabled {
+        opacity: 0.65;
+        cursor: not-allowed;
+      }
+      #status {
+        margin-top: 12px;
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .hint {
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.5;
+        margin-top: 6px;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        button { transition: none; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>FB2Shopee Settings</h1>
+      <label for="apiKey">OpenAI API Key</label>
+      <input id="apiKey" type="password" placeholder="sk-..." />
+      <label for="model">OpenAI Model</label>
+      <input id="model" type="text" placeholder="gpt-4.1-mini" />
+      <div class="hint">Key is stored in chrome.storage.local on your browser profile only.</div>
+      <div class="row">
+        <button id="save">Save</button>
+        <button id="clear" class="secondary">Clear Key</button>
+      </div>
+      <div id="status" role="status" aria-live="polite">Idle</div>
+    </div>
+    <script src="options.js"></script>
+  </body>
+</html>
