@@ -840,16 +840,42 @@
       )
     );
   }
-  function findOptionInputInTierSection(tierSection) {
-    const original = tierSection.querySelector(
-      'input[placeholder*="\u4F8B\u5982: \u7D05\u8272"], input[placeholder*="\u4F8B\u5982: S"], input[placeholder*="\u8F38\u5165\u9078\u9805"], input[placeholder*="option"]'
+  function findOptionInputInTierSection(tierSection, currentTierNameInput) {
+    const tierNameInputs = new Set(
+      Array.from(tierSection.querySelectorAll(
+        'input[placeholder*="\u4F8B\u5982: \u984F\u8272"], input[placeholder*="\u4F8B\u5982: \u5C3A\u5BF8"], input[placeholder*="\u898F\u683C\u540D\u7A31"]'
+      ))
     );
-    if (original) return original;
-    const allInputs = Array.from(
-      tierSection.querySelectorAll('input[placeholder="\u8F38\u5165"]')
-    ).filter((inp) => inp.offsetParent !== null && inp.type !== "file");
-    const emptyInput = allInputs.filter((inp) => !inp.value.trim());
-    return emptyInput[emptyInput.length - 1] ?? allInputs[allInputs.length - 1] ?? null;
+    if (currentTierNameInput) {
+      tierNameInputs.add(currentTierNameInput);
+    }
+    const visibleInputs = Array.from(tierSection.querySelectorAll("input")).filter((inp) => {
+      if (inp.type === "file" || inp.disabled || inp.readOnly) return false;
+      if (inp.offsetParent === null) return false;
+      if (tierNameInputs.has(inp)) return false;
+      return true;
+    });
+    const optionPlaceholderInputs = visibleInputs.filter((inp) => {
+      const placeholder = (inp.placeholder || "").trim();
+      if (!placeholder) return false;
+      if (!/輸入選項|例如:/i.test(placeholder)) return false;
+      if (/顏色|尺寸|variation/i.test(placeholder)) return false;
+      return true;
+    });
+    if (optionPlaceholderInputs.length > 0) {
+      const empty = optionPlaceholderInputs.filter((inp) => !inp.value.trim());
+      return empty[empty.length - 1] ?? optionPlaceholderInputs[optionPlaceholderInputs.length - 1] ?? null;
+    }
+    const genericOptionInputs = visibleInputs.filter((inp) => {
+      const placeholder = (inp.placeholder || "").trim();
+      return placeholder === "\u8F38\u5165" || /option/i.test(placeholder);
+    });
+    if (genericOptionInputs.length > 0) {
+      const empty = genericOptionInputs.filter((inp) => !inp.value.trim());
+      return empty[empty.length - 1] ?? genericOptionInputs[genericOptionInputs.length - 1] ?? null;
+    }
+    const emptyInput = visibleInputs.filter((inp) => !inp.value.trim());
+    return emptyInput[emptyInput.length - 1] ?? visibleInputs[visibleInputs.length - 1] ?? null;
   }
   async function fillTierVariations(draft, reporter) {
     const tiers = draft.shopee.tierVariationList;
@@ -901,10 +927,22 @@
       setNativeValueCharByChar(nameInput, tier.name);
       await sleep(300);
       const tierSection = nameInput.closest(
-        '.edit-row, [class*="variation"], [class*="spec"], [class*="tier"], section, .product-edit-form-item-content'
-      ) ?? nameInput.parentElement?.parentElement?.parentElement ?? nameInput.parentElement;
+        ".variation-edit-item-content, .variation-edit-item, .variation-selector"
+      ) ?? nameInput.closest(
+        ".product-edit-form-item-content"
+      ) ?? (() => {
+        let el = nameInput.parentElement;
+        for (let depth = 0; depth < 12 && el; depth++) {
+          if (el.querySelector('input[placeholder="\u8F38\u5165"], input[placeholder*="\u4F8B\u5982: \u7D05\u8272"]')) {
+            return el;
+          }
+          el = el.parentElement;
+        }
+        return nameInput.parentElement?.parentElement?.parentElement ?? nameInput.parentElement;
+      })();
+      console.log(`[fb2shopee] tierSection for "${tier.name}": ${tierSection.tagName}.${tierSection.className?.split(" ")[0] ?? ""}`);
       for (const option of tier.options) {
-        const optionInput = findOptionInputInTierSection(tierSection);
+        const optionInput = findOptionInputInTierSection(tierSection, nameInput);
         if (!optionInput) {
           console.warn(`[fb2shopee] option input not found for "${option}" in tier "${tier.name}"`);
           reporter.warn(`option input not found for tier "${tier.name}" option "${option}"`);
@@ -1120,18 +1158,29 @@
     let successCount = 0;
     const tableBody = await waitForVariantTable();
     const cellWrappers = tableBody ? Array.from(tableBody.querySelectorAll(".table-cell-wrapper")) : [];
-    if (!cellWrappers.length) {
+    if (cellWrappers.length < imageAssignment.variantImageMap.size) {
       const fallbackCells = Array.from(
         document.querySelectorAll(
-          ".variation-model-table-container .table-cell-wrapper"
+          ".variation-model-table-fixed-left .table-cell-wrapper, .variation-model-table-container .table-cell-wrapper"
         )
       );
       if (fallbackCells.length) {
-        cellWrappers.push(...fallbackCells);
-        console.log(`[fb2shopee] using fallback selector, found ${fallbackCells.length} cell wrappers`);
+        const seen = new Set(cellWrappers);
+        for (const cell of fallbackCells) {
+          if (!seen.has(cell)) {
+            cellWrappers.push(cell);
+            seen.add(cell);
+          }
+        }
+        console.log(`[fb2shopee] merged fallback selector, total ${cellWrappers.length} cell wrappers`);
       }
     }
     console.log(`[fb2shopee] found ${cellWrappers.length} cell wrappers for variant images`);
+    if (cellWrappers.length < imageAssignment.variantImageMap.size) {
+      reporter.warn(
+        `variant rows (${cellWrappers.length}) < bindings (${imageAssignment.variantImageMap.size}); check tier options input`
+      );
+    }
     const tier1Options = draft.shopee.tierVariationList?.[0]?.options ?? [];
     for (const [optionName, sourceIndex] of imageAssignment.variantImageMap) {
       const base64Item = fb.imageBase64List?.find((b) => b.sourceIndex === sourceIndex);
@@ -1141,11 +1190,21 @@
       if (optionIndex >= 0 && optionIndex < cellWrappers.length) {
         const cell = cellWrappers[optionIndex];
         const fileInput = findCellFileInput(cell);
-        if (fileInput && base64Item) {
-          uploaded = await uploadSingleBase64(fileInput, base64Item, reporter, `variantImage:${optionName}`);
-          console.log(`[fb2shopee] strategy 1 (position match) for "${optionName}": ${uploaded ? "OK" : "FAIL"}`);
+        if (fileInput) {
+          if (base64Item) {
+            uploaded = await uploadSingleBase64(fileInput, base64Item, reporter, `variantImage:${optionName}`);
+          } else {
+            const url = fb.imageUrlsOrdered[sourceIndex];
+            if (url) {
+              await uploadImagesFromUrls(fileInput, [url], reporter, `variantImage:${optionName}`);
+              uploaded = true;
+            }
+          }
+          console.log(
+            `[fb2shopee] strategy 1 (position match) for "${optionName}": ${uploaded ? "OK" : "FAIL"}`
+          );
         } else {
-          console.log(`[fb2shopee] strategy 1 for "${optionName}": fileInput=${!!fileInput} base64=${!!base64Item}`);
+          console.log(`[fb2shopee] strategy 1 for "${optionName}": fileInput=false base64=${!!base64Item}`);
         }
       }
       if (!uploaded) {

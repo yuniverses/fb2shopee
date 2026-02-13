@@ -741,35 +741,54 @@ function findTierNameInputs(): HTMLInputElement[] {
  * Before filling, they have placeholder like "例如: 紅色".
  * We look for any visible text input with a short placeholder that is currently empty.
  */
-function findOptionInputInTierSection(tierSection: HTMLElement): HTMLInputElement | null {
-  // IMPORTANT: We must NOT match the tier name input itself!
-  // Tier name input has placeholder like "輸入選項，例如: 顏色" — contains "輸入選項" AND "例如"
-  // Option inputs have placeholder "輸入選項，例如: 紅色" (before tier name is set) or "輸入" (after)
-
-  // Collect all tier name inputs to exclude them
+function findOptionInputInTierSection(
+  tierSection: HTMLElement,
+  currentTierNameInput?: HTMLInputElement
+): HTMLInputElement | null {
+  // IMPORTANT: Do not pick the tier name input itself (placeholder usually "...例如: 顏色/尺寸").
   const tierNameInputs = new Set(
     Array.from(tierSection.querySelectorAll<HTMLInputElement>(
-      'input[placeholder*="例如: 顏色"], input[placeholder*="例如: 尺寸"]'
+      'input[placeholder*="例如: 顏色"], input[placeholder*="例如: 尺寸"], input[placeholder*="規格名稱"]'
     ))
   );
+  if (currentTierNameInput) {
+    tierNameInputs.add(currentTierNameInput);
+  }
 
-  // Priority 1: the original "例如: 紅色" placeholder (before tier name is set)
-  const originalCandidates = Array.from(
-    tierSection.querySelectorAll<HTMLInputElement>(
-      'input[placeholder*="例如: 紅色"], input[placeholder*="例如: S"]'
-    )
-  ).filter((inp) => !tierNameInputs.has(inp) && inp.offsetParent !== null);
-  if (originalCandidates.length > 0) return originalCandidates[0];
+  const visibleInputs = Array.from(tierSection.querySelectorAll<HTMLInputElement>('input'))
+    .filter((inp) => {
+      if (inp.type === 'file' || inp.disabled || inp.readOnly) return false;
+      if (inp.offsetParent === null) return false;
+      if (tierNameInputs.has(inp)) return false;
+      return true;
+    });
 
-  // Priority 2: After tier name is set, option inputs have placeholder="輸入"
-  // Find the last empty one (Shopee always keeps one empty input at the end for adding)
-  const allInputs = Array.from(
-    tierSection.querySelectorAll<HTMLInputElement>('input[placeholder="輸入"]')
-  ).filter((inp) => !tierNameInputs.has(inp) && inp.offsetParent !== null && inp.type !== 'file');
+  // Priority 1: option-style placeholders (before option chips are created).
+  const optionPlaceholderInputs = visibleInputs.filter((inp) => {
+    const placeholder = (inp.placeholder || '').trim();
+    if (!placeholder) return false;
+    if (!/輸入選項|例如:/i.test(placeholder)) return false;
+    if (/顏色|尺寸|variation/i.test(placeholder)) return false;
+    return true;
+  });
+  if (optionPlaceholderInputs.length > 0) {
+    const empty = optionPlaceholderInputs.filter((inp) => !inp.value.trim());
+    return empty[empty.length - 1] ?? optionPlaceholderInputs[optionPlaceholderInputs.length - 1] ?? null;
+  }
 
-  // Return the last empty input — that's the "add new option" input
-  const emptyInput = allInputs.filter((inp) => !inp.value.trim());
-  return emptyInput[emptyInput.length - 1] ?? allInputs[allInputs.length - 1] ?? null;
+  // Priority 2: after tier name is set, Shopee usually uses placeholder="輸入".
+  const genericOptionInputs = visibleInputs.filter((inp) => {
+    const placeholder = (inp.placeholder || '').trim();
+    return placeholder === '輸入' || /option/i.test(placeholder);
+  });
+  if (genericOptionInputs.length > 0) {
+    const empty = genericOptionInputs.filter((inp) => !inp.value.trim());
+    return empty[empty.length - 1] ?? genericOptionInputs[genericOptionInputs.length - 1] ?? null;
+  }
+
+  // Last resort: any empty visible text input within the tier section.
+  const emptyInput = visibleInputs.filter((inp) => !inp.value.trim());
+  return emptyInput[emptyInput.length - 1] ?? visibleInputs[visibleInputs.length - 1] ?? null;
 }
 
 async function fillTierVariations(draft: AiProductDraftV2, reporter: FillReporter): Promise<void> {
@@ -857,7 +876,7 @@ async function fillTierVariations(draft: AiProductDraftV2, reporter: FillReporte
     // Fill each option (e.g., "紅色", "藍色") — must re-find the empty input each time
     for (const option of tier.options) {
       // Re-find the empty option input each time since a new empty one appears after each entry
-      const optionInput = findOptionInputInTierSection(tierSection);
+      const optionInput = findOptionInputInTierSection(tierSection, nameInput);
       if (!optionInput) {
         console.warn(`[fb2shopee] option input not found for "${option}" in tier "${tier.name}"`);
         reporter.warn(`option input not found for tier "${tier.name}" option "${option}"`);
@@ -1184,20 +1203,31 @@ async function bindVariantImages(
     ? Array.from(tableBody.querySelectorAll<HTMLElement>('.table-cell-wrapper'))
     : [];
 
-  // Fallback: try broader selector if no cells found
-  if (!cellWrappers.length) {
+  // If rows are fewer than expected, broaden selection and merge unique cells.
+  if (cellWrappers.length < imageAssignment.variantImageMap.size) {
     const fallbackCells = Array.from(
       document.querySelectorAll<HTMLElement>(
-        '.variation-model-table-container .table-cell-wrapper'
+        '.variation-model-table-fixed-left .table-cell-wrapper, .variation-model-table-container .table-cell-wrapper'
       )
     );
     if (fallbackCells.length) {
-      cellWrappers.push(...fallbackCells);
-      console.log(`[fb2shopee] using fallback selector, found ${fallbackCells.length} cell wrappers`);
+      const seen = new Set(cellWrappers);
+      for (const cell of fallbackCells) {
+        if (!seen.has(cell)) {
+          cellWrappers.push(cell);
+          seen.add(cell);
+        }
+      }
+      console.log(`[fb2shopee] merged fallback selector, total ${cellWrappers.length} cell wrappers`);
     }
   }
 
   console.log(`[fb2shopee] found ${cellWrappers.length} cell wrappers for variant images`);
+  if (cellWrappers.length < imageAssignment.variantImageMap.size) {
+    reporter.warn(
+      `variant rows (${cellWrappers.length}) < bindings (${imageAssignment.variantImageMap.size}); check tier options input`
+    );
+  }
 
   const tier1Options = draft.shopee.tierVariationList?.[0]?.options ?? [];
 
@@ -1212,11 +1242,21 @@ async function bindVariantImages(
     if (optionIndex >= 0 && optionIndex < cellWrappers.length) {
       const cell = cellWrappers[optionIndex];
       const fileInput = findCellFileInput(cell);
-      if (fileInput && base64Item) {
-        uploaded = await uploadSingleBase64(fileInput, base64Item, reporter, `variantImage:${optionName}`);
-        console.log(`[fb2shopee] strategy 1 (position match) for "${optionName}": ${uploaded ? 'OK' : 'FAIL'}`);
+      if (fileInput) {
+        if (base64Item) {
+          uploaded = await uploadSingleBase64(fileInput, base64Item, reporter, `variantImage:${optionName}`);
+        } else {
+          const url = fb.imageUrlsOrdered[sourceIndex];
+          if (url) {
+            await uploadImagesFromUrls(fileInput, [url], reporter, `variantImage:${optionName}`);
+            uploaded = true;
+          }
+        }
+        console.log(
+          `[fb2shopee] strategy 1 (position match) for "${optionName}": ${uploaded ? 'OK' : 'FAIL'}`
+        );
       } else {
-        console.log(`[fb2shopee] strategy 1 for "${optionName}": fileInput=${!!fileInput} base64=${!!base64Item}`);
+        console.log(`[fb2shopee] strategy 1 for "${optionName}": fileInput=false base64=${!!base64Item}`);
       }
     }
 
