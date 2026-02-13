@@ -98,6 +98,14 @@
         line-height: 1.5;
         margin-top: 6px;
       }
+      .hint a {
+        color: var(--primary);
+        text-decoration: underline;
+      }
+      .hint ol {
+        margin: 6px 0 0 18px;
+        padding: 0;
+      }
       @media (prefers-reduced-motion: reduce) {
         button { transition: none; }
       }
@@ -108,6 +116,17 @@
       <h1>FB2Shopee Settings</h1>
       <label for="apiKey">OpenAI API Key</label>
       <input id="apiKey" type="password" placeholder="sk-..." />
+      <div class="hint">
+        API Key 取得連結：
+        <a href="https://platform.openai.com/settings/organization/api-keys" target="_blank" rel="noopener noreferrer">
+          https://platform.openai.com/settings/organization/api-keys
+        </a>
+        <ol>
+          <li>登入 OpenAI 平台並進入上方連結。</li>
+          <li>點選 <strong>Create new secret key</strong> 建立新金鑰。</li>
+          <li>複製 <code>sk-...</code> 金鑰，貼回此頁後按 <strong>Save</strong>。</li>
+        </ol>
+      </div>
       <label for="model">OpenAI Model</label>
       <input id="model" type="text" placeholder="gpt-4.1-mini" />
       <div class="hint">Key is stored in chrome.storage.local on your browser profile only.</div>
