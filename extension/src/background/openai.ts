@@ -208,7 +208,7 @@ function createSystemPrompt(): string {
     'Return only valid JSON matching the target schema.',
     '',
     '## Core Rules',
-    '1. Title: ≤60 Chinese characters. Include brand, origin, core function, use scenario, store identity when possible.',
+    '1. Title: ≤60 Traditional Chinese characters. DO NOT include any store/shop name. Build title from the product name and Shopee TW ranking keywords (category, function, material, use case, target audience) to maximize search SEO.',
     '2. Description: Rich product description in Traditional Chinese. Include materials, dimensions, usage, care instructions.',
     '3. categoryPath: Use real Shopee TW category hierarchy (e.g. ["居家生活","居家裝飾","地毯、地墊"]). Must be concrete leaf category.',
     '4. stock must always be null (seller fills manually).',

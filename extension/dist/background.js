@@ -14210,7 +14210,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
       "Return only valid JSON matching the target schema.",
       "",
       "## Core Rules",
-      "1. Title: \u226460 Chinese characters. Include brand, origin, core function, use scenario, store identity when possible.",
+      "1. Title: \u226460 Traditional Chinese characters. DO NOT include any store/shop name. Build title from the product name and Shopee TW ranking keywords (category, function, material, use case, target audience) to maximize search SEO.",
       "2. Description: Rich product description in Traditional Chinese. Include materials, dimensions, usage, care instructions.",
       '3. categoryPath: Use real Shopee TW category hierarchy (e.g. ["\u5C45\u5BB6\u751F\u6D3B","\u5C45\u5BB6\u88DD\u98FE","\u5730\u6BEF\u3001\u5730\u588A"]). Must be concrete leaf category.',
       "4. stock must always be null (seller fills manually).",
