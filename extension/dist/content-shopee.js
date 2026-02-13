@@ -849,7 +849,24 @@
     if (currentTierNameInput) {
       tierNameInputs.add(currentTierNameInput);
     }
-    const visibleInputs = Array.from(tierSection.querySelectorAll("input")).filter((inp) => {
+    const root = tierSection.querySelector(".variation-option-panel") ?? currentTierNameInput?.closest(".variation-edit-item-content")?.querySelector(".variation-option-panel") ?? tierSection;
+    const pickVisibleInputs = (selector) => Array.from(root.querySelectorAll(selector)).filter((inp) => {
+      if (inp.type === "file" || inp.disabled || inp.readOnly) return false;
+      if (inp.offsetParent === null) return false;
+      if (tierNameInputs.has(inp)) return false;
+      return true;
+    });
+    const strictOptionInputs = [
+      ...pickVisibleInputs('.option-container .options-item.virtual-options-item input[placeholder="\u8F38\u5165"]'),
+      ...pickVisibleInputs('.option-container .options-item input[placeholder="\u8F38\u5165"]'),
+      ...pickVisibleInputs('.options-item.virtual-options-item input[placeholder="\u8F38\u5165"]'),
+      ...pickVisibleInputs('.options-item input[placeholder="\u8F38\u5165"]')
+    ];
+    if (strictOptionInputs.length > 0) {
+      const empty = strictOptionInputs.filter((inp) => !inp.value.trim());
+      return empty[empty.length - 1] ?? strictOptionInputs[strictOptionInputs.length - 1] ?? null;
+    }
+    const visibleInputs = Array.from(root.querySelectorAll("input")).filter((inp) => {
       if (inp.type === "file" || inp.disabled || inp.readOnly) return false;
       if (inp.offsetParent === null) return false;
       if (tierNameInputs.has(inp)) return false;
@@ -875,7 +892,113 @@
       return empty[empty.length - 1] ?? genericOptionInputs[genericOptionInputs.length - 1] ?? null;
     }
     const emptyInput = visibleInputs.filter((inp) => !inp.value.trim());
-    return emptyInput[emptyInput.length - 1] ?? visibleInputs[visibleInputs.length - 1] ?? null;
+    const localFallback = emptyInput[emptyInput.length - 1] ?? visibleInputs[visibleInputs.length - 1] ?? null;
+    if (localFallback) return localFallback;
+    const globalRoot = currentTierNameInput?.closest(".variation-edit-item-content") ?? document;
+    const globalInputs = Array.from(
+      globalRoot.querySelectorAll(
+        '.variation-option-panel .options-item input[placeholder="\u8F38\u5165"], .variation-option-panel input[placeholder="\u8F38\u5165"]'
+      )
+    ).filter((inp) => {
+      if (inp.type === "file" || inp.disabled || inp.readOnly) return false;
+      if (inp.offsetParent === null) return false;
+      return !tierNameInputs.has(inp);
+    });
+    if (globalInputs.length > 0) {
+      const emptyGlobal = globalInputs.filter((inp) => !inp.value.trim());
+      return emptyGlobal[emptyGlobal.length - 1] ?? globalInputs[globalInputs.length - 1] ?? null;
+    }
+    return null;
+  }
+  function resolveTierSectionFromNameInput(nameInput) {
+    const editItem = nameInput.closest(".variation-edit-item-content");
+    if (editItem) return editItem;
+    const itemAlt = nameInput.closest(".variation-edit-item");
+    if (itemAlt) return itemAlt;
+    const namePanel = nameInput.closest(".variation-name-panel");
+    if (namePanel?.parentElement instanceof HTMLElement) return namePanel.parentElement;
+    const formItem = nameInput.closest(".product-edit-form-item");
+    if (formItem) return formItem;
+    return nameInput.parentElement ?? nameInput;
+  }
+  function countVisibleOptionRows(tierSection) {
+    const root = tierSection.querySelector(".variation-option-panel") ?? tierSection;
+    const rows = Array.from(
+      root.querySelectorAll(".option-container .options-item, .options-item")
+    ).filter((row) => row.offsetParent !== null);
+    return rows.length;
+  }
+  async function waitForNextOptionSlot(tierSection, previousInput, previousRowCount, currentTierNameInput, timeoutMs = 3500) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const rowCount = countVisibleOptionRows(tierSection);
+      if (rowCount > previousRowCount) return true;
+      const nextInput = findOptionInputInTierSection(tierSection, currentTierNameInput);
+      if (nextInput && nextInput !== previousInput) return true;
+      if (previousInput.value.trim() === "") return true;
+      await sleep(120);
+    }
+    return false;
+  }
+  function isVisibleElement(el) {
+    if (el.offsetParent === null) return false;
+    const style = window.getComputedStyle(el);
+    return style.visibility !== "hidden" && style.display !== "none";
+  }
+  function textMatchesSpecOpenButton(el) {
+    const t = normalizeText(el.textContent || "");
+    return t.includes(normalizeText("\u958B\u555F\u5546\u54C1\u898F\u683C")) || t.includes(normalizeText("\u65B0\u589E\u898F\u683C")) || t.includes(normalizeText("\u555F\u7528\u898F\u683C"));
+  }
+  function clickSpecButton(button) {
+    try {
+      button.scrollIntoView({ block: "center", inline: "center" });
+    } catch {
+    }
+    button.click();
+    return true;
+  }
+  async function openVariationSection() {
+    if (findTierNameInputs().length > 0) return true;
+    for (let attempt = 1; attempt <= 7; attempt++) {
+      const directButtons = Array.from(
+        document.querySelectorAll(
+          ".variation-add-button button, .variation-add-button .eds-button, button.primary-dash-button"
+        )
+      ).filter((btn) => isVisibleElement(btn) && textMatchesSpecOpenButton(btn));
+      for (const btn of directButtons) {
+        if (clickSpecButton(btn)) {
+          await sleep(300);
+          if (findTierNameInputs().length > 0) return true;
+        }
+      }
+      const labels = findElementsContainingText("\u898F\u683C").filter((el) => isVisibleElement(el)).slice(0, 20);
+      for (const label of labels) {
+        const row = label.closest('.edit-row, [class*="edit-row"], [class*="variation"]');
+        if (!row) continue;
+        const rowButtons = Array.from(row.querySelectorAll('button, [role="button"]')).filter((btn) => isVisibleElement(btn) && textMatchesSpecOpenButton(btn));
+        for (const btn of rowButtons) {
+          if (clickSpecButton(btn)) {
+            await sleep(300);
+            if (findTierNameInputs().length > 0) return true;
+          }
+        }
+      }
+      const salesSection = findFieldContainerByKeywords(["\u92B7\u552E\u8CC7\u8A0A"]) ?? document;
+      const openedInSales = await clickByText(["\u958B\u555F\u5546\u54C1\u898F\u683C", "\u65B0\u589E\u898F\u683C", "\u555F\u7528\u898F\u683C"], salesSection);
+      if (openedInSales) {
+        await sleep(300);
+        if (findTierNameInputs().length > 0) return true;
+      }
+      const openedGlobal = await clickByText(["\u958B\u555F\u5546\u54C1\u898F\u683C", "\u65B0\u589E\u898F\u683C", "\u555F\u7528\u898F\u683C"]);
+      if (openedGlobal) {
+        await sleep(300);
+        if (findTierNameInputs().length > 0) return true;
+      }
+      if (attempt < 7) {
+        await sleep(attempt <= 2 ? 250 : 450);
+      }
+    }
+    return findTierNameInputs().length > 0;
   }
   async function fillTierVariations(draft, reporter) {
     const tiers = draft.shopee.tierVariationList;
@@ -883,7 +1006,7 @@
       reporter.skip("tierVariationList", "no tier variations in AI draft");
       return;
     }
-    const opened = await clickByText(["\u958B\u555F\u5546\u54C1\u898F\u683C", "\u65B0\u589E\u898F\u683C", "\u555F\u7528\u898F\u683C"]);
+    const opened = await openVariationSection();
     if (!opened) {
       const existing = findTierNameInputs();
       if (!existing.length) {
@@ -926,20 +1049,7 @@
       nameInput.focus();
       setNativeValueCharByChar(nameInput, tier.name);
       await sleep(300);
-      const tierSection = nameInput.closest(
-        ".variation-edit-item-content, .variation-edit-item, .variation-selector"
-      ) ?? nameInput.closest(
-        ".product-edit-form-item-content"
-      ) ?? (() => {
-        let el = nameInput.parentElement;
-        for (let depth = 0; depth < 12 && el; depth++) {
-          if (el.querySelector('input[placeholder="\u8F38\u5165"], input[placeholder*="\u4F8B\u5982: \u7D05\u8272"]')) {
-            return el;
-          }
-          el = el.parentElement;
-        }
-        return nameInput.parentElement?.parentElement?.parentElement ?? nameInput.parentElement;
-      })();
+      const tierSection = resolveTierSectionFromNameInput(nameInput);
       console.log(`[fb2shopee] tierSection for "${tier.name}": ${tierSection.tagName}.${tierSection.className?.split(" ")[0] ?? ""}`);
       for (const option of tier.options) {
         const optionInput = findOptionInputInTierSection(tierSection, nameInput);
@@ -948,11 +1058,17 @@
           reporter.warn(`option input not found for tier "${tier.name}" option "${option}"`);
           continue;
         }
+        const beforeRowCount = countVisibleOptionRows(tierSection);
         optionInput.focus();
         setNativeValueCharByChar(optionInput, option);
-        await sleep(100);
+        await sleep(80);
         emitEnter(optionInput);
-        await sleep(300);
+        optionInput.dispatchEvent(new Event("blur", { bubbles: true }));
+        const advanced = await waitForNextOptionSlot(tierSection, optionInput, beforeRowCount, nameInput);
+        if (!advanced) {
+          reporter.warn(`option "${option}" may not be committed yet for tier "${tier.name}"`);
+          await sleep(250);
+        }
       }
       await sleep(300);
     }
@@ -1129,17 +1245,87 @@
     return null;
   }
   function findCellFileInput(cell) {
-    const direct = cell.querySelector('input[type="file"]');
+    const inModal = (el) => !!el?.closest(".eds-modal, .image-cropper-modal, .eds-modal__mask, .eds-modal__container");
+    const direct = Array.from(cell.querySelectorAll('input[type="file"]')).find((inp) => !inModal(inp)) ?? null;
     if (direct) return direct;
-    const uploadBtn = cell.querySelector(
+    const uploadBtn = Array.from(cell.querySelectorAll(
       '.image-upload-button, .upload-button, [class*="upload"], .eds-button'
-    );
+    )).find((btn) => !inModal(btn)) ?? null;
     if (uploadBtn) {
       uploadBtn.click();
-      const revealed = cell.querySelector('input[type="file"]');
+      const revealed = Array.from(cell.querySelectorAll('input[type="file"]')).find((inp) => !inModal(inp)) ?? null;
       if (revealed) return revealed;
     }
     return null;
+  }
+  function isInsideShopeeModal(el) {
+    return !!el?.closest(".eds-modal, .image-cropper-modal, .eds-modal__mask, .eds-modal__container");
+  }
+  function getOptionRowValue(row) {
+    const input = row.querySelector('input.eds-input__input, input[placeholder="\u8F38\u5165"], input');
+    const inputVal = input?.value?.trim();
+    if (inputVal) return inputVal;
+    const text = (row.textContent || "").replace(/\s+/g, " ").trim();
+    return text;
+  }
+  function findTier1OptionRows() {
+    const selectors = [
+      ".variation-edit-item-content .variation-option-panel .option-container .options-item",
+      ".variation-edit-item-content .variation-option-panel .option-container .virtual-options-item",
+      ".variation-edit-item-content .variation-option-panel .options-item",
+      ".variation-edit-item-content .variation-option-panel .virtual-options-item",
+      ".variation-option-panel .option-container .options-item",
+      ".variation-option-panel .option-container .virtual-options-item",
+      ".variation-option-panel .options-item",
+      ".variation-option-panel .virtual-options-item",
+      ".option-container .options-item",
+      ".option-container .virtual-options-item",
+      ".options-item.drag-item",
+      ".virtual-options-item"
+    ];
+    const set = /* @__PURE__ */ new Set();
+    for (const selector of selectors) {
+      for (const row of Array.from(document.querySelectorAll(selector))) {
+        set.add(row);
+      }
+    }
+    const optionInputs = Array.from(
+      document.querySelectorAll('.variation-option-panel input[placeholder="\u8F38\u5165"], input[placeholder="\u8F38\u5165"]')
+    ).filter((inp) => inp.offsetParent !== null && !isInsideShopeeModal(inp));
+    for (const inp of optionInputs) {
+      const row = inp.closest(".options-item, .virtual-options-item, .option-container > div");
+      if (row) set.add(row);
+    }
+    return Array.from(set).filter((row) => !isInsideShopeeModal(row) && row.offsetParent !== null);
+  }
+  function findOptionRowFileInput(row) {
+    const direct = Array.from(
+      row.querySelectorAll('.variation-image-manager input[type="file"], .shopee-image-manager input[type="file"], input[type="file"]')
+    ).find((inp) => !isInsideShopeeModal(inp));
+    if (direct) return direct;
+    const uploadBtn = Array.from(
+      row.querySelectorAll('.shopee-image-manager__upload, .image-upload-button, .upload-button, [class*="upload"], .eds-button')
+    ).find((btn) => !isInsideShopeeModal(btn));
+    if (uploadBtn) {
+      uploadBtn.click();
+      const revealed = Array.from(
+        row.querySelectorAll('.variation-image-manager input[type="file"], .shopee-image-manager input[type="file"], input[type="file"]')
+      ).find((inp) => !isInsideShopeeModal(inp));
+      if (revealed) return revealed;
+    }
+    return null;
+  }
+  async function uploadVariantImageToInput(fileInput, fb, sourceIndex, base64Item, reporter, fieldName) {
+    if (base64Item) {
+      return uploadSingleBase64(fileInput, base64Item, reporter, fieldName);
+    }
+    const url = fb.imageUrlsOrdered[sourceIndex];
+    if (!url) return false;
+    const before = fileInput.files?.length ?? 0;
+    await uploadImagesFromUrls(fileInput, [url], reporter, fieldName);
+    await sleep(120);
+    const after = fileInput.files?.length ?? 0;
+    return after > before || after > 0;
   }
   async function bindVariantImages(fb, draft, imageAssignment, reporter) {
     if (!imageAssignment.variantImageMap.size) {
@@ -1156,14 +1342,23 @@
       Object.fromEntries(imageAssignment.variantImageMap)
     );
     let successCount = 0;
+    const tier1Options = draft.shopee.tierVariationList?.[0]?.options ?? [];
+    const optionRowsAll = findTier1OptionRows();
+    const optionRows = optionRowsAll.filter((row) => {
+      const val = getOptionRowValue(row);
+      if (val && val.length <= 40) return true;
+      if (row.classList.contains("virtual-options-item")) return false;
+      return !!row.querySelector(".shopee-image-manager__image, .variation-image-manager, .shopee-image-manager");
+    });
+    console.log(`[fb2shopee] found ${optionRows.length} tier option rows for variant images`);
     const tableBody = await waitForVariantTable();
-    const cellWrappers = tableBody ? Array.from(tableBody.querySelectorAll(".table-cell-wrapper")) : [];
+    const cellWrappers = tableBody ? Array.from(tableBody.querySelectorAll(".table-cell-wrapper")).filter((cell) => !isInsideShopeeModal(cell) && cell.offsetParent !== null) : [];
     if (cellWrappers.length < imageAssignment.variantImageMap.size) {
       const fallbackCells = Array.from(
         document.querySelectorAll(
           ".variation-model-table-fixed-left .table-cell-wrapper, .variation-model-table-container .table-cell-wrapper"
         )
-      );
+      ).filter((cell) => !isInsideShopeeModal(cell) && cell.offsetParent !== null);
       if (fallbackCells.length) {
         const seen = new Set(cellWrappers);
         for (const cell of fallbackCells) {
@@ -1181,51 +1376,69 @@
         `variant rows (${cellWrappers.length}) < bindings (${imageAssignment.variantImageMap.size}); check tier options input`
       );
     }
-    const tier1Options = draft.shopee.tierVariationList?.[0]?.options ?? [];
     for (const [optionName, sourceIndex] of imageAssignment.variantImageMap) {
       const base64Item = fb.imageBase64List?.find((b) => b.sourceIndex === sourceIndex);
       let uploaded = false;
       console.log(`[fb2shopee] binding variant image: "${optionName}" -> image[${sourceIndex}] (base64: ${!!base64Item})`);
       const optionIndex = tier1Options.indexOf(optionName);
-      if (optionIndex >= 0 && optionIndex < cellWrappers.length) {
+      const rowByName = optionRows.find((row) => normalizeText(getOptionRowValue(row)) === normalizeText(optionName));
+      const rowByPosition = optionIndex >= 0 ? optionRows[optionIndex] ?? null : null;
+      const targetRow = rowByName ?? rowByPosition;
+      if (targetRow) {
+        const fileInput = findOptionRowFileInput(targetRow);
+        if (fileInput) {
+          uploaded = await uploadVariantImageToInput(
+            fileInput,
+            fb,
+            sourceIndex,
+            base64Item,
+            reporter,
+            `variantImage:${optionName}`
+          );
+          console.log(
+            `[fb2shopee] strategy 1 (option row) for "${optionName}": ${uploaded ? "OK" : "FAIL"}`
+          );
+        } else {
+          console.log(`[fb2shopee] strategy 1 for "${optionName}": option-row fileInput=false base64=${!!base64Item}`);
+        }
+      }
+      if (!uploaded && optionIndex >= 0 && optionIndex < cellWrappers.length) {
         const cell = cellWrappers[optionIndex];
         const fileInput = findCellFileInput(cell);
         if (fileInput) {
-          if (base64Item) {
-            uploaded = await uploadSingleBase64(fileInput, base64Item, reporter, `variantImage:${optionName}`);
-          } else {
-            const url = fb.imageUrlsOrdered[sourceIndex];
-            if (url) {
-              await uploadImagesFromUrls(fileInput, [url], reporter, `variantImage:${optionName}`);
-              uploaded = true;
-            }
-          }
+          uploaded = await uploadVariantImageToInput(
+            fileInput,
+            fb,
+            sourceIndex,
+            base64Item,
+            reporter,
+            `variantImage:${optionName}`
+          );
           console.log(
-            `[fb2shopee] strategy 1 (position match) for "${optionName}": ${uploaded ? "OK" : "FAIL"}`
+            `[fb2shopee] strategy 2 (table position) for "${optionName}": ${uploaded ? "OK" : "FAIL"}`
           );
         } else {
-          console.log(`[fb2shopee] strategy 1 for "${optionName}": fileInput=false base64=${!!base64Item}`);
+          console.log(`[fb2shopee] strategy 2 for "${optionName}": fileInput=false base64=${!!base64Item}`);
         }
       }
       if (!uploaded) {
-        const optionElements = findElementsContainingText(optionName);
+        const optionElements = findElementsContainingText(optionName).filter((el) => !isInsideShopeeModal(el) && el.offsetParent !== null);
         for (const optionEl of optionElements) {
           const container = optionEl.closest(
             '.table-cell-wrapper, [class*="variation"], [class*="model"], div'
           ) ?? optionEl;
           const fileInput = findCellFileInput(container);
           if (!fileInput) continue;
-          if (base64Item) {
-            uploaded = await uploadSingleBase64(fileInput, base64Item, reporter, `variantImage:${optionName}`);
-          } else {
-            const url = fb.imageUrlsOrdered[sourceIndex];
-            if (url) {
-              await uploadImagesFromUrls(fileInput, [url], reporter, `variantImage:${optionName}`);
-              uploaded = true;
-            }
-          }
+          uploaded = await uploadVariantImageToInput(
+            fileInput,
+            fb,
+            sourceIndex,
+            base64Item,
+            reporter,
+            `variantImage:${optionName}`
+          );
           if (uploaded) {
-            console.log(`[fb2shopee] strategy 2 (text match) for "${optionName}": OK`);
+            console.log(`[fb2shopee] strategy 3 (text match) for "${optionName}": OK`);
             break;
           }
         }

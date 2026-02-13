@@ -755,7 +755,32 @@ function findOptionInputInTierSection(
     tierNameInputs.add(currentTierNameInput);
   }
 
-  const visibleInputs = Array.from(tierSection.querySelectorAll<HTMLInputElement>('input'))
+  const root = tierSection.querySelector<HTMLElement>('.variation-option-panel')
+    ?? currentTierNameInput?.closest<HTMLElement>('.variation-edit-item-content')?.querySelector<HTMLElement>('.variation-option-panel')
+    ?? tierSection;
+
+  const pickVisibleInputs = (selector: string): HTMLInputElement[] =>
+    Array.from(root.querySelectorAll<HTMLInputElement>(selector)).filter((inp) => {
+      if (inp.type === 'file' || inp.disabled || inp.readOnly) return false;
+      if (inp.offsetParent === null) return false;
+      if (tierNameInputs.has(inp)) return false;
+      return true;
+    });
+
+  // Priority 1 (most reliable for Shopee current DOM):
+  // the "next to fill" row appears as options-item/virtual-options-item with placeholder="輸入".
+  const strictOptionInputs = [
+    ...pickVisibleInputs('.option-container .options-item.virtual-options-item input[placeholder="輸入"]'),
+    ...pickVisibleInputs('.option-container .options-item input[placeholder="輸入"]'),
+    ...pickVisibleInputs('.options-item.virtual-options-item input[placeholder="輸入"]'),
+    ...pickVisibleInputs('.options-item input[placeholder="輸入"]')
+  ];
+  if (strictOptionInputs.length > 0) {
+    const empty = strictOptionInputs.filter((inp) => !inp.value.trim());
+    return empty[empty.length - 1] ?? strictOptionInputs[strictOptionInputs.length - 1] ?? null;
+  }
+
+  const visibleInputs = Array.from(root.querySelectorAll<HTMLInputElement>('input'))
     .filter((inp) => {
       if (inp.type === 'file' || inp.disabled || inp.readOnly) return false;
       if (inp.offsetParent === null) return false;
@@ -763,7 +788,7 @@ function findOptionInputInTierSection(
       return true;
     });
 
-  // Priority 1: option-style placeholders (before option chips are created).
+  // Priority 2: option-style placeholders (before option chips are created).
   const optionPlaceholderInputs = visibleInputs.filter((inp) => {
     const placeholder = (inp.placeholder || '').trim();
     if (!placeholder) return false;
@@ -776,7 +801,7 @@ function findOptionInputInTierSection(
     return empty[empty.length - 1] ?? optionPlaceholderInputs[optionPlaceholderInputs.length - 1] ?? null;
   }
 
-  // Priority 2: after tier name is set, Shopee usually uses placeholder="輸入".
+  // Priority 3: generic placeholder fallback.
   const genericOptionInputs = visibleInputs.filter((inp) => {
     const placeholder = (inp.placeholder || '').trim();
     return placeholder === '輸入' || /option/i.test(placeholder);
@@ -788,7 +813,154 @@ function findOptionInputInTierSection(
 
   // Last resort: any empty visible text input within the tier section.
   const emptyInput = visibleInputs.filter((inp) => !inp.value.trim());
-  return emptyInput[emptyInput.length - 1] ?? visibleInputs[visibleInputs.length - 1] ?? null;
+  const localFallback = emptyInput[emptyInput.length - 1] ?? visibleInputs[visibleInputs.length - 1] ?? null;
+  if (localFallback) return localFallback;
+
+  // Final fallback: query from the whole tier edit item.
+  const globalRoot = currentTierNameInput?.closest<HTMLElement>('.variation-edit-item-content') ?? document;
+  const globalInputs = Array.from(
+    globalRoot.querySelectorAll<HTMLInputElement>(
+      '.variation-option-panel .options-item input[placeholder="輸入"], .variation-option-panel input[placeholder="輸入"]'
+    )
+  ).filter((inp) => {
+    if (inp.type === 'file' || inp.disabled || inp.readOnly) return false;
+    if (inp.offsetParent === null) return false;
+    return !tierNameInputs.has(inp);
+  });
+  if (globalInputs.length > 0) {
+    const emptyGlobal = globalInputs.filter((inp) => !inp.value.trim());
+    return emptyGlobal[emptyGlobal.length - 1] ?? globalInputs[globalInputs.length - 1] ?? null;
+  }
+
+  return null;
+}
+
+function resolveTierSectionFromNameInput(nameInput: HTMLInputElement): HTMLElement {
+  // Must cover both "規格名稱" panel and "選項" panel in the same tier.
+  const editItem = nameInput.closest<HTMLElement>('.variation-edit-item-content');
+  if (editItem) return editItem;
+
+  const itemAlt = nameInput.closest<HTMLElement>('.variation-edit-item');
+  if (itemAlt) return itemAlt;
+
+  const namePanel = nameInput.closest<HTMLElement>('.variation-name-panel');
+  if (namePanel?.parentElement instanceof HTMLElement) return namePanel.parentElement;
+
+  const formItem = nameInput.closest<HTMLElement>('.product-edit-form-item');
+  if (formItem) return formItem;
+
+  return nameInput.parentElement ?? nameInput;
+}
+
+function countVisibleOptionRows(tierSection: HTMLElement): number {
+  const root = tierSection.querySelector<HTMLElement>('.variation-option-panel') ?? tierSection;
+  const rows = Array.from(
+    root.querySelectorAll<HTMLElement>('.option-container .options-item, .options-item')
+  ).filter((row) => row.offsetParent !== null);
+  return rows.length;
+}
+
+async function waitForNextOptionSlot(
+  tierSection: HTMLElement,
+  previousInput: HTMLInputElement,
+  previousRowCount: number,
+  currentTierNameInput?: HTMLInputElement,
+  timeoutMs = 3500
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const rowCount = countVisibleOptionRows(tierSection);
+    if (rowCount > previousRowCount) return true;
+
+    const nextInput = findOptionInputInTierSection(tierSection, currentTierNameInput);
+    if (nextInput && nextInput !== previousInput) return true;
+
+    // Some Shopee builds reuse the same input element and only clear its value.
+    if (previousInput.value.trim() === '') return true;
+
+    await sleep(120);
+  }
+  return false;
+}
+
+function isVisibleElement(el: HTMLElement): boolean {
+  if (el.offsetParent === null) return false;
+  const style = window.getComputedStyle(el);
+  return style.visibility !== 'hidden' && style.display !== 'none';
+}
+
+function textMatchesSpecOpenButton(el: HTMLElement): boolean {
+  const t = normalizeText(el.textContent || '');
+  return t.includes(normalizeText('開啟商品規格'))
+    || t.includes(normalizeText('新增規格'))
+    || t.includes(normalizeText('啟用規格'));
+}
+
+function clickSpecButton(button: HTMLElement): boolean {
+  try {
+    button.scrollIntoView({ block: 'center', inline: 'center' });
+  } catch {
+    // ignore
+  }
+  button.click();
+  return true;
+}
+
+async function openVariationSection(): Promise<boolean> {
+  if (findTierNameInputs().length > 0) return true;
+
+  for (let attempt = 1; attempt <= 7; attempt++) {
+    // Strategy 1: exact Shopee spec-open button selector from sales section.
+    const directButtons = Array.from(
+      document.querySelectorAll<HTMLElement>(
+        '.variation-add-button button, .variation-add-button .eds-button, button.primary-dash-button'
+      )
+    ).filter((btn) => isVisibleElement(btn) && textMatchesSpecOpenButton(btn));
+    for (const btn of directButtons) {
+      if (clickSpecButton(btn)) {
+        await sleep(300);
+        if (findTierNameInputs().length > 0) return true;
+      }
+    }
+
+    // Strategy 2: find "規格" row, then click button within that row.
+    const labels = findElementsContainingText('規格')
+      .filter((el) => isVisibleElement(el))
+      .slice(0, 20);
+    for (const label of labels) {
+      const row = label.closest<HTMLElement>('.edit-row, [class*="edit-row"], [class*="variation"]');
+      if (!row) continue;
+      const rowButtons = Array.from(row.querySelectorAll<HTMLElement>('button, [role="button"]'))
+        .filter((btn) => isVisibleElement(btn) && textMatchesSpecOpenButton(btn));
+      for (const btn of rowButtons) {
+        if (clickSpecButton(btn)) {
+          await sleep(300);
+          if (findTierNameInputs().length > 0) return true;
+        }
+      }
+    }
+
+    // Strategy 3: scoped text click inside sales section.
+    const salesSection = findFieldContainerByKeywords(['銷售資訊']) ?? document;
+    const openedInSales = await clickByText(['開啟商品規格', '新增規格', '啟用規格'], salesSection);
+    if (openedInSales) {
+      await sleep(300);
+      if (findTierNameInputs().length > 0) return true;
+    }
+
+    // Strategy 4: global text click fallback.
+    const openedGlobal = await clickByText(['開啟商品規格', '新增規格', '啟用規格']);
+    if (openedGlobal) {
+      await sleep(300);
+      if (findTierNameInputs().length > 0) return true;
+    }
+
+    if (attempt < 7) {
+      await sleep(attempt <= 2 ? 250 : 450);
+    }
+  }
+
+  return findTierNameInputs().length > 0;
 }
 
 async function fillTierVariations(draft: AiProductDraftV2, reporter: FillReporter): Promise<void> {
@@ -798,8 +970,8 @@ async function fillTierVariations(draft: AiProductDraftV2, reporter: FillReporte
     return;
   }
 
-  // Click "開啟商品規格" button (the "+ 開啟商品規格" link in 銷售資訊)
-  const opened = await clickByText(['開啟商品規格', '新增規格', '啟用規格']);
+  // Click "開啟商品規格" button in sales section.
+  const opened = await openVariationSection();
   if (!opened) {
     // Maybe it's already open — check if tier name inputs exist
     const existing = findTierNameInputs();
@@ -856,21 +1028,7 @@ async function fillTierVariations(draft: AiProductDraftV2, reporter: FillReporte
     // The tier section must contain BOTH the tier name input AND the option inputs.
     // Shopee DOM: .variation-edit-item-content > (.variation-selector-group (name) + .variation-selector-group (options))
     // The [class*="variation"] in .closest() used to match the name input's own wrapper (too narrow).
-    const tierSection = nameInput.closest<HTMLElement>(
-      '.variation-edit-item-content, .variation-edit-item, .variation-selector'
-    ) ?? nameInput.closest<HTMLElement>(
-      '.product-edit-form-item-content'
-    ) ?? (() => {
-      // Fallback: walk up until we find a container that also has an option input
-      let el: HTMLElement | null = nameInput.parentElement;
-      for (let depth = 0; depth < 12 && el; depth++) {
-        if (el.querySelector('input[placeholder="輸入"], input[placeholder*="例如: 紅色"]')) {
-          return el;
-        }
-        el = el.parentElement;
-      }
-      return nameInput.parentElement?.parentElement?.parentElement ?? nameInput.parentElement!;
-    })();
+    const tierSection = resolveTierSectionFromNameInput(nameInput);
     console.log(`[fb2shopee] tierSection for "${tier.name}": ${tierSection.tagName}.${tierSection.className?.split(' ')[0] ?? ''}`);
 
     // Fill each option (e.g., "紅色", "藍色") — must re-find the empty input each time
@@ -883,11 +1041,19 @@ async function fillTierVariations(draft: AiProductDraftV2, reporter: FillReporte
         continue;
       }
 
+      const beforeRowCount = countVisibleOptionRows(tierSection);
       optionInput.focus();
       setNativeValueCharByChar(optionInput, option);
-      await sleep(100);
+      await sleep(80);
       emitEnter(optionInput);
-      await sleep(300); // Wait for Shopee to register the option and add a new empty input
+      optionInput.dispatchEvent(new Event('blur', { bubbles: true }));
+
+      // Wait until Shopee accepts this option and exposes the next slot.
+      const advanced = await waitForNextOptionSlot(tierSection, optionInput, beforeRowCount, nameInput);
+      if (!advanced) {
+        reporter.warn(`option "${option}" may not be committed yet for tier "${tier.name}"`);
+        await sleep(250);
+      }
     }
 
     await sleep(300);
@@ -1154,22 +1320,115 @@ async function waitForVariantTable(maxAttempts = 6, delayMs = 800): Promise<HTML
 }
 
 function findCellFileInput(cell: HTMLElement): HTMLInputElement | null {
+  const inModal = (el: Element | null): boolean =>
+    !!el?.closest('.eds-modal, .image-cropper-modal, .eds-modal__mask, .eds-modal__container');
+
   // Strategy A: Direct file input inside the cell
-  const direct = cell.querySelector<HTMLInputElement>('input[type="file"]');
+  const direct = Array.from(cell.querySelectorAll<HTMLInputElement>('input[type="file"]'))
+    .find((inp) => !inModal(inp)) ?? null;
   if (direct) return direct;
 
   // Strategy B: Click upload button to reveal file input
-  const uploadBtn = cell.querySelector<HTMLElement>(
+  const uploadBtn = Array.from(cell.querySelectorAll<HTMLElement>(
     '.image-upload-button, .upload-button, [class*="upload"], .eds-button'
-  );
+  )).find((btn) => !inModal(btn)) ?? null;
   if (uploadBtn) {
     uploadBtn.click();
     // Check again after click
-    const revealed = cell.querySelector<HTMLInputElement>('input[type="file"]');
+    const revealed = Array.from(cell.querySelectorAll<HTMLInputElement>('input[type="file"]'))
+      .find((inp) => !inModal(inp)) ?? null;
     if (revealed) return revealed;
   }
 
   return null;
+}
+
+function isInsideShopeeModal(el: Element | null): boolean {
+  return !!el?.closest('.eds-modal, .image-cropper-modal, .eds-modal__mask, .eds-modal__container');
+}
+
+function getOptionRowValue(row: HTMLElement): string {
+  const input = row.querySelector<HTMLInputElement>('input.eds-input__input, input[placeholder="輸入"], input');
+  const inputVal = input?.value?.trim();
+  if (inputVal) return inputVal;
+
+  const text = (row.textContent || '').replace(/\s+/g, ' ').trim();
+  return text;
+}
+
+function findTier1OptionRows(): HTMLElement[] {
+  const selectors = [
+    '.variation-edit-item-content .variation-option-panel .option-container .options-item',
+    '.variation-edit-item-content .variation-option-panel .option-container .virtual-options-item',
+    '.variation-edit-item-content .variation-option-panel .options-item',
+    '.variation-edit-item-content .variation-option-panel .virtual-options-item',
+    '.variation-option-panel .option-container .options-item',
+    '.variation-option-panel .option-container .virtual-options-item',
+    '.variation-option-panel .options-item',
+    '.variation-option-panel .virtual-options-item',
+    '.option-container .options-item',
+    '.option-container .virtual-options-item',
+    '.options-item.drag-item',
+    '.virtual-options-item'
+  ];
+
+  const set = new Set<HTMLElement>();
+  for (const selector of selectors) {
+    for (const row of Array.from(document.querySelectorAll<HTMLElement>(selector))) {
+      set.add(row);
+    }
+  }
+
+  // Fallback: derive row containers from visible option inputs.
+  const optionInputs = Array.from(
+    document.querySelectorAll<HTMLInputElement>('.variation-option-panel input[placeholder="輸入"], input[placeholder="輸入"]')
+  ).filter((inp) => inp.offsetParent !== null && !isInsideShopeeModal(inp));
+  for (const inp of optionInputs) {
+    const row = inp.closest<HTMLElement>('.options-item, .virtual-options-item, .option-container > div');
+    if (row) set.add(row);
+  }
+
+  return Array.from(set).filter((row) => !isInsideShopeeModal(row) && row.offsetParent !== null);
+}
+
+function findOptionRowFileInput(row: HTMLElement): HTMLInputElement | null {
+  const direct = Array.from(
+    row.querySelectorAll<HTMLInputElement>('.variation-image-manager input[type="file"], .shopee-image-manager input[type="file"], input[type="file"]')
+  ).find((inp) => !isInsideShopeeModal(inp));
+  if (direct) return direct;
+
+  const uploadBtn = Array.from(
+    row.querySelectorAll<HTMLElement>('.shopee-image-manager__upload, .image-upload-button, .upload-button, [class*="upload"], .eds-button')
+  ).find((btn) => !isInsideShopeeModal(btn));
+  if (uploadBtn) {
+    uploadBtn.click();
+    const revealed = Array.from(
+      row.querySelectorAll<HTMLInputElement>('.variation-image-manager input[type="file"], .shopee-image-manager input[type="file"], input[type="file"]')
+    ).find((inp) => !isInsideShopeeModal(inp));
+    if (revealed) return revealed;
+  }
+
+  return null;
+}
+
+async function uploadVariantImageToInput(
+  fileInput: HTMLInputElement,
+  fb: FBPostPayload,
+  sourceIndex: number,
+  base64Item: FBImageBase64 | undefined,
+  reporter: FillReporter,
+  fieldName: string
+): Promise<boolean> {
+  if (base64Item) {
+    return uploadSingleBase64(fileInput, base64Item, reporter, fieldName);
+  }
+  const url = fb.imageUrlsOrdered[sourceIndex];
+  if (!url) return false;
+  const before = fileInput.files?.length ?? 0;
+  await uploadImagesFromUrls(fileInput, [url], reporter, fieldName);
+  await sleep(120);
+  const after = fileInput.files?.length ?? 0;
+  return after > before || after > 0;
 }
 
 async function bindVariantImages(
@@ -1195,12 +1454,24 @@ async function bindVariantImages(
   );
 
   let successCount = 0;
+  const tier1Options = draft.shopee.tierVariationList?.[0]?.options ?? [];
+
+  // Strategy 0: Bind directly on option rows (where image upload actually lives).
+  const optionRowsAll = findTier1OptionRows();
+  const optionRows = optionRowsAll.filter((row) => {
+    const val = getOptionRowValue(row);
+    if (val && val.length <= 40) return true;
+    if (row.classList.contains('virtual-options-item')) return false;
+    return !!row.querySelector('.shopee-image-manager__image, .variation-image-manager, .shopee-image-manager');
+  });
+  console.log(`[fb2shopee] found ${optionRows.length} tier option rows for variant images`);
 
   // Wait for the variant table to appear (may take time after spec options are filled)
   const tableBody = await waitForVariantTable();
 
   const cellWrappers = tableBody
     ? Array.from(tableBody.querySelectorAll<HTMLElement>('.table-cell-wrapper'))
+      .filter((cell) => !isInsideShopeeModal(cell) && cell.offsetParent !== null)
     : [];
 
   // If rows are fewer than expected, broaden selection and merge unique cells.
@@ -1209,7 +1480,7 @@ async function bindVariantImages(
       document.querySelectorAll<HTMLElement>(
         '.variation-model-table-fixed-left .table-cell-wrapper, .variation-model-table-container .table-cell-wrapper'
       )
-    );
+    ).filter((cell) => !isInsideShopeeModal(cell) && cell.offsetParent !== null);
     if (fallbackCells.length) {
       const seen = new Set(cellWrappers);
       for (const cell of fallbackCells) {
@@ -1229,40 +1500,51 @@ async function bindVariantImages(
     );
   }
 
-  const tier1Options = draft.shopee.tierVariationList?.[0]?.options ?? [];
-
   for (const [optionName, sourceIndex] of imageAssignment.variantImageMap) {
     const base64Item = fb.imageBase64List?.find((b) => b.sourceIndex === sourceIndex);
     let uploaded = false;
 
     console.log(`[fb2shopee] binding variant image: "${optionName}" -> image[${sourceIndex}] (base64: ${!!base64Item})`);
 
-    // Strategy 1: Match by position in the cell wrappers (corresponds to tier1 option order)
+    // Strategy 1: option row by text / position
     const optionIndex = tier1Options.indexOf(optionName);
-    if (optionIndex >= 0 && optionIndex < cellWrappers.length) {
-      const cell = cellWrappers[optionIndex];
-      const fileInput = findCellFileInput(cell);
+    const rowByName = optionRows.find((row) => normalizeText(getOptionRowValue(row)) === normalizeText(optionName));
+    const rowByPosition = optionIndex >= 0 ? (optionRows[optionIndex] ?? null) : null;
+    const targetRow = rowByName ?? rowByPosition;
+    if (targetRow) {
+      const fileInput = findOptionRowFileInput(targetRow);
       if (fileInput) {
-        if (base64Item) {
-          uploaded = await uploadSingleBase64(fileInput, base64Item, reporter, `variantImage:${optionName}`);
-        } else {
-          const url = fb.imageUrlsOrdered[sourceIndex];
-          if (url) {
-            await uploadImagesFromUrls(fileInput, [url], reporter, `variantImage:${optionName}`);
-            uploaded = true;
-          }
-        }
+        uploaded = await uploadVariantImageToInput(
+          fileInput, fb, sourceIndex, base64Item, reporter, `variantImage:${optionName}`
+        );
         console.log(
-          `[fb2shopee] strategy 1 (position match) for "${optionName}": ${uploaded ? 'OK' : 'FAIL'}`
+          `[fb2shopee] strategy 1 (option row) for "${optionName}": ${uploaded ? 'OK' : 'FAIL'}`
         );
       } else {
-        console.log(`[fb2shopee] strategy 1 for "${optionName}": fileInput=false base64=${!!base64Item}`);
+        console.log(`[fb2shopee] strategy 1 for "${optionName}": option-row fileInput=false base64=${!!base64Item}`);
       }
     }
 
-    // Strategy 2: Find by text near file input
+    // Strategy 2: Match by position in table wrappers (fallback)
+    if (!uploaded && optionIndex >= 0 && optionIndex < cellWrappers.length) {
+      const cell = cellWrappers[optionIndex];
+      const fileInput = findCellFileInput(cell);
+      if (fileInput) {
+        uploaded = await uploadVariantImageToInput(
+          fileInput, fb, sourceIndex, base64Item, reporter, `variantImage:${optionName}`
+        );
+        console.log(
+          `[fb2shopee] strategy 2 (table position) for "${optionName}": ${uploaded ? 'OK' : 'FAIL'}`
+        );
+      } else {
+        console.log(`[fb2shopee] strategy 2 for "${optionName}": fileInput=false base64=${!!base64Item}`);
+      }
+    }
+
+    // Strategy 3: Find by text near file input
     if (!uploaded) {
-      const optionElements = findElementsContainingText(optionName);
+      const optionElements = findElementsContainingText(optionName)
+        .filter((el) => !isInsideShopeeModal(el) && el.offsetParent !== null);
       for (const optionEl of optionElements) {
         const container = optionEl.closest<HTMLElement>(
           '.table-cell-wrapper, [class*="variation"], [class*="model"], div'
@@ -1271,17 +1553,11 @@ async function bindVariantImages(
         const fileInput = findCellFileInput(container);
         if (!fileInput) continue;
 
-        if (base64Item) {
-          uploaded = await uploadSingleBase64(fileInput, base64Item, reporter, `variantImage:${optionName}`);
-        } else {
-          const url = fb.imageUrlsOrdered[sourceIndex];
-          if (url) {
-            await uploadImagesFromUrls(fileInput, [url], reporter, `variantImage:${optionName}`);
-            uploaded = true;
-          }
-        }
+        uploaded = await uploadVariantImageToInput(
+          fileInput, fb, sourceIndex, base64Item, reporter, `variantImage:${optionName}`
+        );
         if (uploaded) {
-          console.log(`[fb2shopee] strategy 2 (text match) for "${optionName}": OK`);
+          console.log(`[fb2shopee] strategy 3 (text match) for "${optionName}": OK`);
           break;
         }
       }
