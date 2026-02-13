@@ -1,4 +1,5 @@
 import type {
+  FBImageBase64,
   FillReportV2,
   OpenAiSettings,
   PipelineDebugState,
@@ -10,6 +11,7 @@ const STORAGE_KEYS = {
   lastSchema: 'lastSchema',
   lastReport: 'lastReport',
   lastFbPayload: 'lastFbPayload',
+  lastFbBase64Images: 'lastFbBase64Images',
   lastAiDraft: 'lastAiDraft',
   lastPipelineDebug: 'lastPipelineDebug'
 } as const;
@@ -53,12 +55,35 @@ export async function getLastReport(): Promise<FillReportV2 | null> {
 }
 
 export async function setLastFbPayload(payload: unknown): Promise<void> {
-  await chrome.storage.local.set({ [STORAGE_KEYS.lastFbPayload]: payload });
+  // Store base64 images separately to keep the main payload lightweight.
+  // This also avoids message passing size limits.
+  const typed = payload as { imageBase64List?: FBImageBase64[] } | undefined;
+  const base64List = typed?.imageBase64List;
+
+  // Strip base64 from the main payload to avoid bloat in storage reads
+  if (typed && Array.isArray(base64List)) {
+    const { imageBase64List: _, ...withoutBase64 } = typed;
+    await chrome.storage.local.set({
+      [STORAGE_KEYS.lastFbPayload]: withoutBase64,
+      [STORAGE_KEYS.lastFbBase64Images]: base64List
+    });
+  } else {
+    await chrome.storage.local.set({ [STORAGE_KEYS.lastFbPayload]: payload });
+  }
 }
 
 export async function getLastFbPayload<T>(): Promise<T | null> {
-  const raw = await chrome.storage.local.get(STORAGE_KEYS.lastFbPayload);
-  return (raw[STORAGE_KEYS.lastFbPayload] as T | undefined) ?? null;
+  const raw = await chrome.storage.local.get([STORAGE_KEYS.lastFbPayload, STORAGE_KEYS.lastFbBase64Images]);
+  const payload = raw[STORAGE_KEYS.lastFbPayload] as T | undefined;
+  if (!payload) return null;
+
+  // Re-attach base64 images if available
+  const base64 = raw[STORAGE_KEYS.lastFbBase64Images] as FBImageBase64[] | undefined;
+  if (base64?.length) {
+    (payload as Record<string, unknown>).imageBase64List = base64;
+  }
+
+  return payload;
 }
 
 export async function setLastAiDraft(draft: unknown): Promise<void> {

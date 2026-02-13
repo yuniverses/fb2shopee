@@ -8,10 +8,18 @@ export type ShopeeFieldSection =
   | 'shipping'
   | 'other';
 
+export interface FBImageBase64 {
+  base64: string;
+  mimeType: string;
+  sourceIndex: number;
+}
+
 export interface FBPostPayload {
   postUrl: string;
   postText: string;
   imageUrlsOrdered: string[];
+  /** Pre-fetched base64 images (fetched in FB page context where cookies are available). */
+  imageBase64List?: FBImageBase64[];
   capturedAtISO: string;
 }
 
@@ -128,6 +136,7 @@ export interface PipelineDebugState {
   endedAtISO?: string;
   currentStage: string;
   ok: boolean;
+  cancelled?: boolean;
   error?: string;
   events: PipelineDebugEvent[];
 }

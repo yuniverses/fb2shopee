@@ -15,7 +15,7 @@ interface OpenAiInputImage {
 }
 
 const INPUT_IMAGE_FETCH_TIMEOUT_MS = 15000;
-const OPENAI_TIMEOUT_MS = 90000;
+const OPENAI_TIMEOUT_MS = 180000; // 3 min — vision requests with multiple images are slow
 type ProgressCallback = (message: string) => void | Promise<void>;
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
@@ -79,9 +79,22 @@ function isImageResponse(response: Response, sourceUrl: string): boolean {
   return /\.(png|jpe?g|webp|gif)(\?|$)/i.test(sourceUrl) || /\.(png|jpe?g|webp|gif)(\?|$)/i.test(response.url);
 }
 
-async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+  externalSignal?: AbortSignal
+): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  // Abort our internal controller when the external signal fires
+  if (externalSignal?.aborted) {
+    controller.abort();
+  }
+  const onExternalAbort = () => controller.abort();
+  externalSignal?.addEventListener('abort', onExternalAbort, { once: true });
+
   try {
     return await fetch(url, {
       ...init,
@@ -89,11 +102,15 @@ async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: numbe
     });
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') {
+      if (externalSignal?.aborted) {
+        throw new Error('Pipeline cancelled');
+      }
       throw new Error(`Timed out while fetching: ${url}`);
     }
     throw error;
   } finally {
     clearTimeout(timer);
+    externalSignal?.removeEventListener('abort', onExternalAbort);
   }
 }
 
@@ -187,25 +204,73 @@ export async function fetchInputImages(
 
 function createSystemPrompt(): string {
   return [
-    'You are an e-commerce listing assistant for Shopee TW.',
+    'You are an e-commerce listing assistant for Shopee TW (台灣蝦皮賣場).',
     'Return only valid JSON matching the target schema.',
-    'Rules:',
-    '1. Keep title <= 60 Chinese characters and include brand, origin, core function, use scenario, and store identity when possible.',
-    '2. Preserve image order from sourceIndex.',
-    '3. Infer variation dimensions and model combinations from post text + image OCR + visual cues.',
-    '4. Produce variantImageBindings for tier1 option only (one image per tier1 option).',
-    '5. If confidence < 0.78, do not bind and emit pendingVariantImageBindings with reason low_confidence.',
-    '6. stock must always be null.',
-    '7. categoryPath must be concrete and directly usable.',
-    '8. source MUST be an object that mirrors the input fb payload, not a string label.',
-    '9. For optional fields, omit them when unknown. Never output null for optional string/number fields.',
-    '10. If uncertain, add warnings with explicit uncertainty.'
+    '',
+    '## Core Rules',
+    '1. Title: ≤60 Chinese characters. Include brand, origin, core function, use scenario, store identity when possible.',
+    '2. Description: Rich product description in Traditional Chinese. Include materials, dimensions, usage, care instructions.',
+    '3. categoryPath: Use real Shopee TW category hierarchy (e.g. ["居家生活","居家裝飾","地毯、地墊"]). Must be concrete leaf category.',
+    '4. stock must always be null (seller fills manually).',
+    '5. source MUST mirror the input fb payload object.',
+    '6. For optional fields, omit when unknown. Never output null for optional string/number fields.',
+    '',
+    '## Image Assignment (CRITICAL)',
+    'You receive multiple product images. Your key task is to classify each image:',
+    '',
+    '- **Variant images**: Images showing a specific color/style/size variant. These go to variantImageBindings.',
+    '- **Main images**: General product images (lifestyle shots, detail shots, packaging). These go to shopee.images.',
+    '',
+    'How to decide:',
+    '- If an image clearly shows ONE specific variant (e.g., only the red version), bind it to that tier1 option.',
+    '- If an image shows the product in general or multiple variants together, put it in shopee.images.',
+    '- Each tier1 option should have AT MOST one bound image (the best/clearest one).',
+    '- Remaining images that are not bound to variants should ALL be in shopee.images.',
+    '',
+    '7. variantImageBindings: one entry per tier1 option with {tier1Option, imageSourceIndex, confidence}.',
+    '8. confidence: 0.0-1.0. Use ≥0.85 when you are certain, 0.5-0.84 when guessing. <0.5 → emit pendingVariantImageBindings instead.',
+    '9. If confidence < 0.78 at normalization stage, binding is demoted to pending automatically.',
+    '',
+    '## Variant Image Matching Strategies (IMPORTANT)',
+    'Each image is labeled [Image N] where N is the imageSourceIndex. Always use these exact indices in variantImageBindings.',
+    '',
+    'Common patterns in FB group posts to identify which image belongs to which variant:',
+    '- Posts with items labeled A款/B款/C款, A/B/C, or 1號/2號/3號: Each label corresponds to one variant. Images appear in the SAME ORDER as the labels.',
+    '- Posts listing colors (e.g., "紅色/藍色/黑色") followed by images: Images typically appear in the same order as color names.',
+    '- If images contain visible text labels (printed on/near the item), use OCR text to match them to tier1 option names.',
+    '- If a single image shows multiple items side-by-side (composite/collage), do NOT bind it to one variant — put it in shopee.images as a main image.',
+    '- When the post says "顏色如圖" (colors as shown), each image likely represents one variant option in order.',
+    '- If the number of individual product images matches the number of variants, map them 1:1 in order.',
+    '',
+    'Confidence guidelines for variantImageBindings:',
+    '- 0.90-1.0: Image has visible text matching the option name, or post explicitly maps images to options.',
+    '- 0.80-0.89: Strong positional correlation (first color → first image) or clear visual match (color matches).',
+    '- 0.70-0.79: Reasonable guess based on image order and variant count alignment.',
+    '- Below 0.70: Put in pendingVariantImageBindings with reason instead.',
+    '',
+    '## Variations & Models',
+    '- Infer variation dimensions (顏色/Color, 尺寸/Size, 款式/Style) from post text + image OCR + visual cues.',
+    '- tierVariationList: [{name: "顏色", options: ["紅色","藍色"]}] — use Traditional Chinese.',
+    '- modelList: one entry per combination. price in TWD (NT$). stock: null.',
+    '- If the post mentions a single price, apply it to all models.',
+    '- If different variants have different prices, parse them from the text.',
+    '',
+    '## Pricing',
+    '- Parse prices from the FB post text (look for NT$, 元, $, numbers near price keywords).',
+    '- If no price found, set a reasonable default (e.g., 299) and add a warning.',
+    '',
+    '10. If uncertain about anything, add warnings with explicit uncertainty description.'
   ].join('\n');
 }
 
 function createUserPrompt(fb: FBPostPayload, schema: ShopeeSchemaSnapshot): string {
+  // IMPORTANT: strip imageBase64List from the FB payload before serialization.
+  // The base64 data is only used for input_image payloads, not the text prompt.
+  // Including it would make the request body enormous (50-100+ MB).
+  const { imageBase64List: _strip, ...fbWithoutBase64 } = fb;
+
   const payload = {
-    fb,
+    fb: fbWithoutBase64,
     schema,
     outputShape: {
       source: {
@@ -308,22 +373,61 @@ export async function generateAiDraft(
   settings: OpenAiSettings,
   fb: FBPostPayload,
   schema: ShopeeSchemaSnapshot,
-  onProgress?: ProgressCallback
+  onProgress?: ProgressCallback,
+  abortSignal?: AbortSignal
 ): Promise<{ draft: AiProductDraftV2; warnings: string[] }> {
   const model = settings.model?.trim() || DEFAULT_OPENAI_MODEL;
-  const images = await fetchInputImages(fb.imageUrlsOrdered, onProgress);
+
+  // Prefer pre-fetched base64 from FB content script (has cookies).
+  // Fall back to background fetch for any missing images.
+  // NOTE: base64 may not arrive via message passing if payload is too large (Chrome limit).
+  let images: OpenAiInputImage[];
+  const hasBase64 = Array.isArray(fb.imageBase64List) && fb.imageBase64List.length > 0;
+  if (hasBase64) {
+    await onProgress?.(`Using ${fb.imageBase64List!.length} pre-fetched base64 images from FB`);
+    images = fb.imageBase64List!.map((item) => ({
+      url: fb.imageUrlsOrdered[item.sourceIndex] || '',
+      mimeType: item.mimeType,
+      base64: item.base64,
+      sourceIndex: item.sourceIndex
+    }));
+  } else {
+    await onProgress?.('No pre-fetched base64 available, fetching images from background');
+    images = await fetchInputImages(fb.imageUrlsOrdered, onProgress);
+  }
+
   if (!images.length) {
     throw new Error('No valid FB images were resolved for AI input');
   }
 
-  const imageInputs = images.map((image) => ({
-    type: 'input_image',
-    image_url: `data:${image.mimeType};base64,${image.base64}`
-  }));
+  // Cap images to avoid oversized payloads — Shopee allows max 9 main images,
+  // so sending more than ~12 is wasteful and dramatically slows down the API call.
+  const MAX_AI_IMAGES = 12;
+  if (images.length > MAX_AI_IMAGES) {
+    await onProgress?.(`Trimming images from ${images.length} to ${MAX_AI_IMAGES} for AI`);
+    images = images.slice(0, MAX_AI_IMAGES);
+  }
 
-  const body = {
+  // Build image inputs with [Image N] labels so AI can reference each image by index
+  const imageInputs: Array<{ type: string; text?: string; image_url?: string }> = [];
+  for (const image of images) {
+    imageInputs.push({
+      type: 'input_text',
+      text: `[Image ${image.sourceIndex}]`
+    });
+    imageInputs.push({
+      type: 'input_image',
+      image_url: `data:${image.mimeType};base64,${image.base64}`
+    });
+  }
+
+  // GPT-5.2 is a thinking model — use reasoning.effort to control thinking depth.
+  // For product listing extraction, "low" is sufficient and keeps latency down.
+  const isThinkingModel = /gpt-5|o[1-9]|o3/.test(model);
+  const body: Record<string, unknown> = {
     model,
-    temperature: 0.2,
+    ...(!isThinkingModel && { temperature: 0.2 }),
+    ...(isThinkingModel && { reasoning: { effort: 'low' } }),
     input: [
       {
         role: 'system',
@@ -337,10 +441,18 @@ export async function generateAiDraft(
   };
 
   let lastError = '';
+  const bodyJson = JSON.stringify(body);
+  const bodySizeMB = (bodyJson.length / (1024 * 1024)).toFixed(1);
+  await onProgress?.(`Request body size: ${bodySizeMB} MB (${images.length} images)`);
 
   for (let attempt = 1; attempt <= 3; attempt += 1) {
+    // Check abort before each attempt to avoid unnecessary retries
+    if (abortSignal?.aborted) {
+      throw new Error('Pipeline cancelled');
+    }
     try {
-      await onProgress?.(`Sending OpenAI request attempt ${attempt}/3`);
+      await onProgress?.(`Sending OpenAI request attempt ${attempt}/3 (model: ${model})`);
+      const fetchStart = Date.now();
       const response = await fetchWithTimeout(
         'https://api.openai.com/v1/responses',
         {
@@ -349,22 +461,30 @@ export async function generateAiDraft(
             Authorization: `Bearer ${settings.apiKey}`,
             'Content-Type': 'application/json'
           },
-          body: JSON.stringify(body)
+          body: bodyJson
         },
-        OPENAI_TIMEOUT_MS
+        OPENAI_TIMEOUT_MS,
+        abortSignal
       );
+      const fetchMs = Date.now() - fetchStart;
 
       if (!response.ok) {
         const errorText = await response.text();
-        throw new Error(`OpenAI API error (${response.status}): ${errorText}`);
+        throw new Error(`OpenAI API error (${response.status}) after ${fetchMs}ms: ${errorText.substring(0, 500)}`);
       }
 
-      await onProgress?.('OpenAI response received, validating JSON');
+      await onProgress?.(`OpenAI response received in ${fetchMs}ms, reading body`);
       const json = (await response.json()) as unknown;
+      await onProgress?.('OpenAI body parsed, extracting text');
       const text = extractResponseText(json);
-      const parsed = parseAiDraft(parseModelJson(text), fb);
+      if (!text) {
+        throw new Error('OpenAI returned empty response text');
+      }
+      // Pass fb without base64 as source fallback — base64 doesn't belong in the AI draft
+      const { imageBase64List: _stripFallback, ...fbSourceFallback } = fb;
+      const parsed = parseAiDraft(parseModelJson(text), fbSourceFallback);
       const normalized = normalizeAiDraft(parsed, schema.constraints);
-      await onProgress?.('AI draft validated');
+      await onProgress?.(`AI draft validated (${text.length} chars response)`);
       return {
         draft: normalized.draft,
         warnings: normalized.warnings

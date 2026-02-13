@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { AiProductDraftV2, FBPostPayload, ShopeeConstraints } from './contracts';
+import { VARIANT_IMAGE_CONFIDENCE_THRESHOLD } from './constants';
 
 const optionalString = z
   .union([z.string(), z.null(), z.undefined()])
@@ -38,6 +39,15 @@ export const AiProductDraftV2Schema = z.object({
     postUrl: z.string().url(),
     postText: z.string(),
     imageUrlsOrdered: z.array(z.string().url()),
+    imageBase64List: z
+      .array(
+        z.object({
+          base64: z.string(),
+          mimeType: z.string(),
+          sourceIndex: z.number().int().nonnegative()
+        })
+      )
+      .optional(),
     capturedAtISO: z.string()
   }),
   shopee: z.object({
@@ -159,7 +169,7 @@ export function normalizeAiDraft(
     confidence: data.confidence
   }));
 
-  const lowConfidence = normalized.variantImageBindings.filter((x) => x.confidence < 0.78);
+  const lowConfidence = normalized.variantImageBindings.filter((x) => x.confidence < VARIANT_IMAGE_CONFIDENCE_THRESHOLD);
   if (lowConfidence.length) {
     for (const item of lowConfidence) {
       normalized.pendingVariantImageBindings.push({
@@ -167,7 +177,7 @@ export function normalizeAiDraft(
         reason: 'low_confidence'
       });
     }
-    normalized.variantImageBindings = normalized.variantImageBindings.filter((x) => x.confidence >= 0.78);
+    normalized.variantImageBindings = normalized.variantImageBindings.filter((x) => x.confidence >= VARIANT_IMAGE_CONFIDENCE_THRESHOLD);
     warnings.push(`removed ${lowConfidence.length} low-confidence variant image bindings`);
   }
 

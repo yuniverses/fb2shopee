@@ -9,6 +9,7 @@
     get_fill_report: "get_fill_report",
     get_pipeline_debug: "get_pipeline_debug",
     run_pipeline: "run_pipeline",
+    cancel_pipeline: "cancel_pipeline",
     open_shopee_tab: "open_shopee_tab"
   };
 
@@ -387,6 +388,56 @@
     }
     return mergeUniqueOrdered([...viewerUrls, ...base]);
   }
+  var IMAGE_FETCH_TIMEOUT_MS = 12e3;
+  function arrayBufferToBase64(buffer) {
+    const bytes = new Uint8Array(buffer);
+    let binary = "";
+    for (let i = 0; i < bytes.length; i += 1) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+  }
+  function resolveMimeFromResponse(contentType, url) {
+    if (contentType && contentType.includes("/")) {
+      return contentType.split(";")[0]?.trim() ?? "image/jpeg";
+    }
+    if (url.endsWith(".png")) return "image/png";
+    if (url.endsWith(".webp")) return "image/webp";
+    return "image/jpeg";
+  }
+  async function fetchImageAsBase64(url, index) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), IMAGE_FETCH_TIMEOUT_MS);
+      const response = await fetch(url, {
+        method: "GET",
+        credentials: "include",
+        redirect: "follow",
+        signal: controller.signal
+      });
+      clearTimeout(timer);
+      if (!response.ok) {
+        return null;
+      }
+      const mime = resolveMimeFromResponse(response.headers.get("content-type"), response.url || url);
+      const buffer = await response.arrayBuffer();
+      if (buffer.byteLength < 500) {
+        return null;
+      }
+      return {
+        base64: arrayBufferToBase64(buffer),
+        mimeType: mime,
+        sourceIndex: index
+      };
+    } catch {
+      return null;
+    }
+  }
+  async function prefetchImagesAsBase64(urls) {
+    const tasks = urls.map((url, index) => fetchImageAsBase64(url, index));
+    const settled = await Promise.all(tasks);
+    return settled.filter((item) => item !== null);
+  }
   async function collectFbPayload() {
     const postUrl = normalizePostUrl(window.location.href);
     const postText = collectPostText();
@@ -394,10 +445,12 @@
     if (!postText && !imageUrlsOrdered.length) {
       throw new Error("No post text or images found on current FB page");
     }
+    const imageBase64List = await prefetchImagesAsBase64(imageUrlsOrdered);
     return {
       postUrl,
       postText,
       imageUrlsOrdered,
+      imageBase64List,
       capturedAtISO: (/* @__PURE__ */ new Date()).toISOString()
     };
   }
@@ -408,7 +461,14 @@
     void (async () => {
       try {
         const payload = await collectFbPayload();
-        sendResponse({ ok: true, payload });
+        if (payload.imageBase64List?.length) {
+          try {
+            await chrome.storage.local.set({ lastFbBase64Images: payload.imageBase64List });
+          } catch {
+          }
+        }
+        const { imageBase64List: _strip, ...payloadWithoutBase64 } = payload;
+        sendResponse({ ok: true, payload: payloadWithoutBase64 });
       } catch (error) {
         sendResponse({ ok: false, error: error instanceof Error ? error.message : "Failed to collect FB post" });
       }

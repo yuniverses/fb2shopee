@@ -1,4 +1,4 @@
-import type { AiModel, FillReportV2 } from '@shared/contracts';
+import type { AiModel, FBImageBase64, FillReportV2 } from '@shared/contracts';
 
 export class FillReporter {
   private readonly successFields = new Set<string>();
@@ -96,6 +96,31 @@ export function setNativeValue(element: HTMLInputElement | HTMLTextAreaElement, 
   dispatchInputEvents(element);
 }
 
+/**
+ * Set input value character-by-character to ensure Vue/React reactivity picks up the change.
+ * This is required for Shopee's batch apply button and some Vue-driven fields that only
+ * listen to incremental `input` events rather than a single bulk value assignment.
+ */
+export function setNativeValueCharByChar(element: HTMLInputElement | HTMLTextAreaElement, value: string): void {
+  const nativeSetter = Object.getOwnPropertyDescriptor(
+    Object.getPrototypeOf(element) as HTMLInputElement,
+    'value'
+  )?.set;
+  const setter = nativeSetter ? (v: string) => nativeSetter.call(element, v) : (v: string) => { element.value = v; };
+
+  element.focus();
+  // Clear existing value
+  setter('');
+  element.dispatchEvent(new Event('input', { bubbles: true }));
+
+  // Type character by character
+  for (const ch of value) {
+    setter(element.value + ch);
+    element.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  element.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
 export function findInputInContainer(container: HTMLElement | null): HTMLInputElement | HTMLTextAreaElement | null {
   if (!container) {
     return null;
@@ -118,16 +143,25 @@ export function setContentEditableText(element: HTMLElement, value: string): voi
 }
 
 export async function clickByText(textCandidates: string[], root: ParentNode = document): Promise<boolean> {
-  const clickableSelector = 'button, [role="button"], a, div, span';
+  // Prioritize interactive elements (button, a) over generic containers (div, span).
+  // Shopee wraps buttons in multiple div layers; clicking the outer div doesn't
+  // trigger the Vue event handler on the actual <button>.
+  const prioritySelectors = [
+    'button, [role="button"], a',
+    'div, span'
+  ];
 
   for (const text of textCandidates) {
     const targetText = normalizeText(text);
-    const elements = Array.from(root.querySelectorAll<HTMLElement>(clickableSelector));
-    const found = elements.find((el) => normalizeText(el.textContent || '').includes(targetText));
-    if (found) {
-      found.click();
-      await sleep(120);
-      return true;
+
+    for (const selector of prioritySelectors) {
+      const elements = Array.from(root.querySelectorAll<HTMLElement>(selector));
+      const found = elements.find((el) => normalizeText(el.textContent || '').includes(targetText));
+      if (found) {
+        found.click();
+        await sleep(120);
+        return true;
+      }
     }
   }
 
@@ -159,6 +193,21 @@ export function findFileInputByContext(contextKeywords: string[]): HTMLInputElem
   return document.querySelector<HTMLInputElement>('input[type="file"]');
 }
 
+function base64ToBlob(base64: string, mimeType: string): Blob {
+  const binaryString = atob(base64);
+  const bytes = new Uint8Array(binaryString.length);
+  for (let i = 0; i < binaryString.length; i += 1) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return new Blob([bytes], { type: mimeType });
+}
+
+function base64ToFile(item: FBImageBase64, index: number): File {
+  const ext = item.mimeType.includes('png') ? 'png' : item.mimeType.includes('webp') ? 'webp' : 'jpg';
+  const blob = base64ToBlob(item.base64, item.mimeType);
+  return new File([blob], `fb-image-${index + 1}.${ext}`, { type: item.mimeType });
+}
+
 async function fetchImageAsFile(url: string, index: number): Promise<File> {
   const response = await fetch(url);
   if (!response.ok) {
@@ -168,6 +217,65 @@ async function fetchImageAsFile(url: string, index: number): Promise<File> {
   const blob = await response.blob();
   const ext = blob.type.includes('png') ? 'png' : blob.type.includes('webp') ? 'webp' : 'jpg';
   return new File([blob], `fb-image-${index + 1}.${ext}`, { type: blob.type || 'image/jpeg' });
+}
+
+/** Upload images from pre-fetched base64 data (preferred) or fallback to URL fetch. */
+export async function uploadImagesFromBase64(
+  input: HTMLInputElement,
+  base64List: FBImageBase64[],
+  reporter: FillReporter,
+  fieldName = 'images'
+): Promise<void> {
+  if (!base64List.length) {
+    reporter.skip(fieldName, 'no base64 images');
+    return;
+  }
+
+  const files: File[] = [];
+  for (let i = 0; i < base64List.length; i += 1) {
+    try {
+      files.push(base64ToFile(base64List[i], i));
+    } catch (error) {
+      reporter.warn(`base64 image ${i + 1} failed: ${error instanceof Error ? error.message : 'unknown'}`);
+    }
+  }
+
+  if (!files.length) {
+    reporter.fail(fieldName, 'all base64 conversions failed');
+    return;
+  }
+
+  const transfer = new DataTransfer();
+  for (const file of files) {
+    transfer.items.add(file);
+  }
+
+  input.files = transfer.files;
+  input.dispatchEvent(new Event('change', { bubbles: true }));
+  await sleep(500);
+  reporter.success(fieldName);
+}
+
+/** Upload a single base64 image to a file input. */
+export async function uploadSingleBase64(
+  input: HTMLInputElement,
+  item: FBImageBase64,
+  reporter: FillReporter,
+  fieldName: string
+): Promise<boolean> {
+  try {
+    const file = base64ToFile(item, item.sourceIndex);
+    const transfer = new DataTransfer();
+    transfer.items.add(file);
+    input.files = transfer.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    await sleep(400);
+    reporter.success(fieldName);
+    return true;
+  } catch (error) {
+    reporter.fail(fieldName, error instanceof Error ? error.message : 'unknown');
+    return false;
+  }
 }
 
 export async function uploadImagesFromUrls(

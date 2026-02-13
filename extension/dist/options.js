@@ -1,7 +1,7 @@
 "use strict";
 (() => {
   // src/shared/constants.ts
-  var DEFAULT_OPENAI_MODEL = "gpt-4.1-mini";
+  var DEFAULT_OPENAI_MODEL = "gpt-5.2-2025-12-11";
   var SCHEMA_MAX_AGE_MS = 24 * 60 * 60 * 1e3;
 
   // src/shared/storage.ts
@@ -10,6 +10,7 @@
     lastSchema: "lastSchema",
     lastReport: "lastReport",
     lastFbPayload: "lastFbPayload",
+    lastFbBase64Images: "lastFbBase64Images",
     lastAiDraft: "lastAiDraft",
     lastPipelineDebug: "lastPipelineDebug"
   };

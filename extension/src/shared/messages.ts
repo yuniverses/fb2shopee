@@ -15,6 +15,7 @@ export const MSG = {
   get_fill_report: 'get_fill_report',
   get_pipeline_debug: 'get_pipeline_debug',
   run_pipeline: 'run_pipeline',
+  cancel_pipeline: 'cancel_pipeline',
   open_shopee_tab: 'open_shopee_tab'
 } as const;
 
@@ -98,6 +99,15 @@ export interface RunPipelineResponse {
   error?: string;
 }
 
+export interface CancelPipelineRequest {
+  type: typeof MSG.cancel_pipeline;
+}
+
+export interface CancelPipelineResponse {
+  ok: boolean;
+  error?: string;
+}
+
 export interface OpenShopeeTabRequest {
   type: typeof MSG.open_shopee_tab;
 }
@@ -119,6 +129,7 @@ export type AnyRuntimeRequest =
   | GetFillReportRequest
   | GetPipelineDebugRequest
   | RunPipelineRequest
+  | CancelPipelineRequest
   | OpenShopeeTabRequest;
 
 export type AnyRuntimeResponse =
@@ -129,4 +140,5 @@ export type AnyRuntimeResponse =
   | GetFillReportResponse
   | GetPipelineDebugResponse
   | RunPipelineResponse
+  | CancelPipelineResponse
   | OpenShopeeTabResponse;

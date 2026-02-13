@@ -8,8 +8,9 @@
 
   // src/shared/constants.ts
   var SHOPEE_NEW_PRODUCT_URL = "https://seller.shopee.tw/portal/product/new?from=sidebar";
-  var DEFAULT_OPENAI_MODEL = "gpt-4.1-mini";
+  var DEFAULT_OPENAI_MODEL = "gpt-5.2-2025-12-11";
   var SCHEMA_MAX_AGE_MS = 24 * 60 * 60 * 1e3;
+  var VARIANT_IMAGE_CONFIDENCE_THRESHOLD = 0.7;
 
   // src/shared/messages.ts
   var MSG = {
@@ -20,6 +21,7 @@
     get_fill_report: "get_fill_report",
     get_pipeline_debug: "get_pipeline_debug",
     run_pipeline: "run_pipeline",
+    cancel_pipeline: "cancel_pipeline",
     open_shopee_tab: "open_shopee_tab"
   };
 
@@ -29,6 +31,7 @@
     lastSchema: "lastSchema",
     lastReport: "lastReport",
     lastFbPayload: "lastFbPayload",
+    lastFbBase64Images: "lastFbBase64Images",
     lastAiDraft: "lastAiDraft",
     lastPipelineDebug: "lastPipelineDebug"
   };
@@ -64,11 +67,27 @@
     return raw[STORAGE_KEYS.lastReport] ?? null;
   }
   async function setLastFbPayload(payload) {
-    await chrome.storage.local.set({ [STORAGE_KEYS.lastFbPayload]: payload });
+    const typed = payload;
+    const base64List = typed?.imageBase64List;
+    if (typed && Array.isArray(base64List)) {
+      const { imageBase64List: _, ...withoutBase64 } = typed;
+      await chrome.storage.local.set({
+        [STORAGE_KEYS.lastFbPayload]: withoutBase64,
+        [STORAGE_KEYS.lastFbBase64Images]: base64List
+      });
+    } else {
+      await chrome.storage.local.set({ [STORAGE_KEYS.lastFbPayload]: payload });
+    }
   }
   async function getLastFbPayload() {
-    const raw = await chrome.storage.local.get(STORAGE_KEYS.lastFbPayload);
-    return raw[STORAGE_KEYS.lastFbPayload] ?? null;
+    const raw = await chrome.storage.local.get([STORAGE_KEYS.lastFbPayload, STORAGE_KEYS.lastFbBase64Images]);
+    const payload = raw[STORAGE_KEYS.lastFbPayload];
+    if (!payload) return null;
+    const base643 = raw[STORAGE_KEYS.lastFbBase64Images];
+    if (base643?.length) {
+      payload.imageBase64List = base643;
+    }
+    return payload;
   }
   async function setLastAiDraft(draft) {
     await chrome.storage.local.set({ [STORAGE_KEYS.lastAiDraft]: draft });
@@ -13919,6 +13938,13 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
       postUrl: external_exports.string().url(),
       postText: external_exports.string(),
       imageUrlsOrdered: external_exports.array(external_exports.string().url()),
+      imageBase64List: external_exports.array(
+        external_exports.object({
+          base64: external_exports.string(),
+          mimeType: external_exports.string(),
+          sourceIndex: external_exports.number().int().nonnegative()
+        })
+      ).optional(),
       capturedAtISO: external_exports.string()
     }),
     shopee: external_exports.object({
@@ -14015,7 +14041,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
       imageSourceIndex: data.index,
       confidence: data.confidence
     }));
-    const lowConfidence = normalized.variantImageBindings.filter((x) => x.confidence < 0.78);
+    const lowConfidence = normalized.variantImageBindings.filter((x) => x.confidence < VARIANT_IMAGE_CONFIDENCE_THRESHOLD);
     if (lowConfidence.length) {
       for (const item of lowConfidence) {
         normalized.pendingVariantImageBindings.push({
@@ -14023,7 +14049,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
           reason: "low_confidence"
         });
       }
-      normalized.variantImageBindings = normalized.variantImageBindings.filter((x) => x.confidence >= 0.78);
+      normalized.variantImageBindings = normalized.variantImageBindings.filter((x) => x.confidence >= VARIANT_IMAGE_CONFIDENCE_THRESHOLD);
       warnings.push(`removed ${lowConfidence.length} low-confidence variant image bindings`);
     }
     return { draft: normalized, warnings };
@@ -14031,7 +14057,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
 
   // src/background/openai.ts
   var INPUT_IMAGE_FETCH_TIMEOUT_MS = 15e3;
-  var OPENAI_TIMEOUT_MS = 9e4;
+  var OPENAI_TIMEOUT_MS = 18e4;
   function arrayBufferToBase64(buffer) {
     const bytes = new Uint8Array(buffer);
     let binary = "";
@@ -14079,9 +14105,14 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
     }
     return /\.(png|jpe?g|webp|gif)(\?|$)/i.test(sourceUrl) || /\.(png|jpe?g|webp|gif)(\?|$)/i.test(response.url);
   }
-  async function fetchWithTimeout(url2, init, timeoutMs) {
+  async function fetchWithTimeout(url2, init, timeoutMs, externalSignal) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    if (externalSignal?.aborted) {
+      controller.abort();
+    }
+    const onExternalAbort = () => controller.abort();
+    externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
     try {
       return await fetch(url2, {
         ...init,
@@ -14089,11 +14120,15 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
       });
     } catch (error48) {
       if (error48 instanceof DOMException && error48.name === "AbortError") {
+        if (externalSignal?.aborted) {
+          throw new Error("Pipeline cancelled");
+        }
         throw new Error(`Timed out while fetching: ${url2}`);
       }
       throw error48;
     } finally {
       clearTimeout(timer);
+      externalSignal?.removeEventListener("abort", onExternalAbort);
     }
   }
   async function fetchImagePayload(url2) {
@@ -14171,24 +14206,68 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
   }
   function createSystemPrompt() {
     return [
-      "You are an e-commerce listing assistant for Shopee TW.",
+      "You are an e-commerce listing assistant for Shopee TW (\u53F0\u7063\u8766\u76AE\u8CE3\u5834).",
       "Return only valid JSON matching the target schema.",
-      "Rules:",
-      "1. Keep title <= 60 Chinese characters and include brand, origin, core function, use scenario, and store identity when possible.",
-      "2. Preserve image order from sourceIndex.",
-      "3. Infer variation dimensions and model combinations from post text + image OCR + visual cues.",
-      "4. Produce variantImageBindings for tier1 option only (one image per tier1 option).",
-      "5. If confidence < 0.78, do not bind and emit pendingVariantImageBindings with reason low_confidence.",
-      "6. stock must always be null.",
-      "7. categoryPath must be concrete and directly usable.",
-      "8. source MUST be an object that mirrors the input fb payload, not a string label.",
-      "9. For optional fields, omit them when unknown. Never output null for optional string/number fields.",
-      "10. If uncertain, add warnings with explicit uncertainty."
+      "",
+      "## Core Rules",
+      "1. Title: \u226460 Chinese characters. Include brand, origin, core function, use scenario, store identity when possible.",
+      "2. Description: Rich product description in Traditional Chinese. Include materials, dimensions, usage, care instructions.",
+      '3. categoryPath: Use real Shopee TW category hierarchy (e.g. ["\u5C45\u5BB6\u751F\u6D3B","\u5C45\u5BB6\u88DD\u98FE","\u5730\u6BEF\u3001\u5730\u588A"]). Must be concrete leaf category.',
+      "4. stock must always be null (seller fills manually).",
+      "5. source MUST mirror the input fb payload object.",
+      "6. For optional fields, omit when unknown. Never output null for optional string/number fields.",
+      "",
+      "## Image Assignment (CRITICAL)",
+      "You receive multiple product images. Your key task is to classify each image:",
+      "",
+      "- **Variant images**: Images showing a specific color/style/size variant. These go to variantImageBindings.",
+      "- **Main images**: General product images (lifestyle shots, detail shots, packaging). These go to shopee.images.",
+      "",
+      "How to decide:",
+      "- If an image clearly shows ONE specific variant (e.g., only the red version), bind it to that tier1 option.",
+      "- If an image shows the product in general or multiple variants together, put it in shopee.images.",
+      "- Each tier1 option should have AT MOST one bound image (the best/clearest one).",
+      "- Remaining images that are not bound to variants should ALL be in shopee.images.",
+      "",
+      "7. variantImageBindings: one entry per tier1 option with {tier1Option, imageSourceIndex, confidence}.",
+      "8. confidence: 0.0-1.0. Use \u22650.85 when you are certain, 0.5-0.84 when guessing. <0.5 \u2192 emit pendingVariantImageBindings instead.",
+      "9. If confidence < 0.78 at normalization stage, binding is demoted to pending automatically.",
+      "",
+      "## Variant Image Matching Strategies (IMPORTANT)",
+      "Each image is labeled [Image N] where N is the imageSourceIndex. Always use these exact indices in variantImageBindings.",
+      "",
+      "Common patterns in FB group posts to identify which image belongs to which variant:",
+      "- Posts with items labeled A\u6B3E/B\u6B3E/C\u6B3E, A/B/C, or 1\u865F/2\u865F/3\u865F: Each label corresponds to one variant. Images appear in the SAME ORDER as the labels.",
+      '- Posts listing colors (e.g., "\u7D05\u8272/\u85CD\u8272/\u9ED1\u8272") followed by images: Images typically appear in the same order as color names.',
+      "- If images contain visible text labels (printed on/near the item), use OCR text to match them to tier1 option names.",
+      "- If a single image shows multiple items side-by-side (composite/collage), do NOT bind it to one variant \u2014 put it in shopee.images as a main image.",
+      '- When the post says "\u984F\u8272\u5982\u5716" (colors as shown), each image likely represents one variant option in order.',
+      "- If the number of individual product images matches the number of variants, map them 1:1 in order.",
+      "",
+      "Confidence guidelines for variantImageBindings:",
+      "- 0.90-1.0: Image has visible text matching the option name, or post explicitly maps images to options.",
+      "- 0.80-0.89: Strong positional correlation (first color \u2192 first image) or clear visual match (color matches).",
+      "- 0.70-0.79: Reasonable guess based on image order and variant count alignment.",
+      "- Below 0.70: Put in pendingVariantImageBindings with reason instead.",
+      "",
+      "## Variations & Models",
+      "- Infer variation dimensions (\u984F\u8272/Color, \u5C3A\u5BF8/Size, \u6B3E\u5F0F/Style) from post text + image OCR + visual cues.",
+      '- tierVariationList: [{name: "\u984F\u8272", options: ["\u7D05\u8272","\u85CD\u8272"]}] \u2014 use Traditional Chinese.',
+      "- modelList: one entry per combination. price in TWD (NT$). stock: null.",
+      "- If the post mentions a single price, apply it to all models.",
+      "- If different variants have different prices, parse them from the text.",
+      "",
+      "## Pricing",
+      "- Parse prices from the FB post text (look for NT$, \u5143, $, numbers near price keywords).",
+      "- If no price found, set a reasonable default (e.g., 299) and add a warning.",
+      "",
+      "10. If uncertain about anything, add warnings with explicit uncertainty description."
     ].join("\n");
   }
   function createUserPrompt(fb, schema) {
+    const { imageBase64List: _strip, ...fbWithoutBase64 } = fb;
     const payload = {
-      fb,
+      fb: fbWithoutBase64,
       schema,
       outputShape: {
         source: {
@@ -14275,19 +14354,46 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
       throw new Error("Model did not return valid JSON");
     }
   }
-  async function generateAiDraft(settings, fb, schema, onProgress) {
+  async function generateAiDraft(settings, fb, schema, onProgress, abortSignal) {
     const model = settings.model?.trim() || DEFAULT_OPENAI_MODEL;
-    const images = await fetchInputImages(fb.imageUrlsOrdered, onProgress);
+    let images;
+    const hasBase64 = Array.isArray(fb.imageBase64List) && fb.imageBase64List.length > 0;
+    if (hasBase64) {
+      await onProgress?.(`Using ${fb.imageBase64List.length} pre-fetched base64 images from FB`);
+      images = fb.imageBase64List.map((item) => ({
+        url: fb.imageUrlsOrdered[item.sourceIndex] || "",
+        mimeType: item.mimeType,
+        base64: item.base64,
+        sourceIndex: item.sourceIndex
+      }));
+    } else {
+      await onProgress?.("No pre-fetched base64 available, fetching images from background");
+      images = await fetchInputImages(fb.imageUrlsOrdered, onProgress);
+    }
     if (!images.length) {
       throw new Error("No valid FB images were resolved for AI input");
     }
-    const imageInputs = images.map((image) => ({
-      type: "input_image",
-      image_url: `data:${image.mimeType};base64,${image.base64}`
-    }));
+    const MAX_AI_IMAGES = 12;
+    if (images.length > MAX_AI_IMAGES) {
+      await onProgress?.(`Trimming images from ${images.length} to ${MAX_AI_IMAGES} for AI`);
+      images = images.slice(0, MAX_AI_IMAGES);
+    }
+    const imageInputs = [];
+    for (const image of images) {
+      imageInputs.push({
+        type: "input_text",
+        text: `[Image ${image.sourceIndex}]`
+      });
+      imageInputs.push({
+        type: "input_image",
+        image_url: `data:${image.mimeType};base64,${image.base64}`
+      });
+    }
+    const isThinkingModel = /gpt-5|o[1-9]|o3/.test(model);
     const body = {
       model,
-      temperature: 0.2,
+      ...!isThinkingModel && { temperature: 0.2 },
+      ...isThinkingModel && { reasoning: { effort: "low" } },
       input: [
         {
           role: "system",
@@ -14300,9 +14406,16 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
       ]
     };
     let lastError = "";
+    const bodyJson = JSON.stringify(body);
+    const bodySizeMB = (bodyJson.length / (1024 * 1024)).toFixed(1);
+    await onProgress?.(`Request body size: ${bodySizeMB} MB (${images.length} images)`);
     for (let attempt = 1; attempt <= 3; attempt += 1) {
+      if (abortSignal?.aborted) {
+        throw new Error("Pipeline cancelled");
+      }
       try {
-        await onProgress?.(`Sending OpenAI request attempt ${attempt}/3`);
+        await onProgress?.(`Sending OpenAI request attempt ${attempt}/3 (model: ${model})`);
+        const fetchStart = Date.now();
         const response = await fetchWithTimeout(
           "https://api.openai.com/v1/responses",
           {
@@ -14311,20 +14424,27 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
               Authorization: `Bearer ${settings.apiKey}`,
               "Content-Type": "application/json"
             },
-            body: JSON.stringify(body)
+            body: bodyJson
           },
-          OPENAI_TIMEOUT_MS
+          OPENAI_TIMEOUT_MS,
+          abortSignal
         );
+        const fetchMs = Date.now() - fetchStart;
         if (!response.ok) {
           const errorText = await response.text();
-          throw new Error(`OpenAI API error (${response.status}): ${errorText}`);
+          throw new Error(`OpenAI API error (${response.status}) after ${fetchMs}ms: ${errorText.substring(0, 500)}`);
         }
-        await onProgress?.("OpenAI response received, validating JSON");
+        await onProgress?.(`OpenAI response received in ${fetchMs}ms, reading body`);
         const json2 = await response.json();
+        await onProgress?.("OpenAI body parsed, extracting text");
         const text = extractResponseText(json2);
-        const parsed = parseAiDraft(parseModelJson(text), fb);
+        if (!text) {
+          throw new Error("OpenAI returned empty response text");
+        }
+        const { imageBase64List: _stripFallback, ...fbSourceFallback } = fb;
+        const parsed = parseAiDraft(parseModelJson(text), fbSourceFallback);
         const normalized = normalizeAiDraft(parsed, schema.constraints);
-        await onProgress?.("AI draft validated");
+        await onProgress?.(`AI draft validated (${text.length} chars response)`);
         return {
           draft: normalized.draft,
           warnings: normalized.warnings
@@ -14391,8 +14511,19 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
     if (!response.ok || !response.payload) {
       throw new Error(response.error || "Failed to collect FB post");
     }
-    await setLastFbPayload(response.payload);
-    return response.payload;
+    const fb = response.payload;
+    if (!fb.imageBase64List?.length) {
+      try {
+        const stored = await chrome.storage.local.get("lastFbBase64Images");
+        const base64List = stored.lastFbBase64Images;
+        if (Array.isArray(base64List) && base64List.length > 0) {
+          fb.imageBase64List = base64List;
+        }
+      } catch {
+      }
+    }
+    await setLastFbPayload(fb);
+    return fb;
   }
   async function collectShopeeSchemaFromTab(tabId) {
     const cached2 = await getLastSchema();
@@ -14412,19 +14543,46 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
     return response.payload;
   }
   async function applyDraftToShopeeTab(tabId, fb, draft) {
-    const response = await sendTabMessageWithAutoInject(
-      tabId,
-      {
-        type: MSG.apply_shopee_draft,
-        payload: { fb, draft }
-      },
-      "content-shopee.js"
-    );
-    if (!response.ok || !response.payload) {
-      throw new Error(response.error || "Failed to apply draft on Shopee page");
+    const { imageBase64List: _stripFb, ...fbWithoutBase64 } = fb;
+    const { imageBase64List: _stripSource, ...sourceWithoutBase64 } = draft.source;
+    const draftWithoutBase64 = {
+      ...draft,
+      source: { ...sourceWithoutBase64 }
+    };
+    const messagePayload = {
+      type: MSG.apply_shopee_draft,
+      payload: { fb: fbWithoutBase64, draft: draftWithoutBase64 }
+    };
+    let lastError = "";
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        const response = await sendTabMessageWithAutoInject(
+          tabId,
+          messagePayload,
+          "content-shopee.js"
+        );
+        if (!response.ok || !response.payload) {
+          throw new Error(response.error || "Failed to apply draft on Shopee page");
+        }
+        await setLastReport(response.payload);
+        return response.payload;
+      } catch (error48) {
+        lastError = pickErrorMessage(error48);
+        if (attempt < 2 && /message channel closed|Receiving end does not exist|Could not establish connection/i.test(lastError)) {
+          try {
+            await chrome.scripting.executeScript({
+              target: { tabId },
+              files: ["content-shopee.js"]
+            });
+            await new Promise((resolve) => setTimeout(resolve, 500));
+          } catch {
+          }
+          continue;
+        }
+        throw error48;
+      }
     }
-    await setLastReport(response.payload);
-    return response.payload;
+    throw new Error(lastError || "Failed to apply draft on Shopee page");
   }
   function isMissingReceiverError(error48) {
     const message = pickErrorMessage(error48);
@@ -14441,6 +14599,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
         target: { tabId },
         files: [contentScriptFile]
       });
+      await new Promise((resolve) => setTimeout(resolve, 300));
       return sendTabMessage(tabId, message);
     }
   }
@@ -14469,24 +14628,59 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
     debug.endedAtISO = nowIso();
     await setLastPipelineDebug(debug);
   }
+  var pipelineAbortController = null;
+  var PipelineCancelledError = class extends Error {
+    constructor() {
+      super("Pipeline cancelled by user");
+      this.name = "PipelineCancelledError";
+    }
+  };
+  function throwIfAborted(signal) {
+    if (signal.aborted) {
+      throw new PipelineCancelledError();
+    }
+  }
+  function createKeepalive() {
+    const storageTimer = setInterval(() => {
+      void chrome.storage.session?.set({ _keepalive: Date.now() }).catch(() => {
+      });
+    }, 25e3);
+    const apiTimer = setInterval(() => {
+      void chrome.runtime.getPlatformInfo().catch(() => {
+      });
+    }, 2e4);
+    return {
+      stop: () => {
+        clearInterval(storageTimer);
+        clearInterval(apiTimer);
+      }
+    };
+  }
   async function runPipeline() {
     const debug = createInitialDebugState();
+    const keepalive = createKeepalive();
+    pipelineAbortController = new AbortController();
+    const signal = pipelineAbortController.signal;
     await appendDebug(debug, "init", "Pipeline started");
     try {
+      throwIfAborted(signal);
       await appendDebug(debug, MSG.collect_fb_post, "Collecting FB post from active tab");
       const settings = await getOpenAiSettings();
       if (!settings?.apiKey) {
         throw new Error("OpenAI API key not set. Please open extension options to configure.");
       }
       const fb = await collectFbFromActiveTab();
+      throwIfAborted(signal);
       await appendDebug(
         debug,
         MSG.collect_fb_post,
         `FB collected: ${fb.imageUrlsOrdered.length} image(s), text length ${fb.postText.length}`
       );
+      throwIfAborted(signal);
       await appendDebug(debug, MSG.open_shopee_tab, "Opening/activating Shopee new product tab");
       const shopeeTab = await ensureShopeeTab();
       await waitForTabComplete(shopeeTab.id);
+      throwIfAborted(signal);
       await appendDebug(debug, MSG.collect_shopee_schema, "Collecting Shopee schema snapshot");
       const schema = await collectShopeeSchemaFromTab(shopeeTab.id);
       await appendDebug(
@@ -14494,6 +14688,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
         MSG.collect_shopee_schema,
         `Schema ready: ${schema.fields.length} field(s), version ${schema.version}`
       );
+      throwIfAborted(signal);
       await appendDebug(debug, MSG.generate_ai_draft, "Calling OpenAI to generate listing draft");
       const ai = await generateAiDraft(
         {
@@ -14504,8 +14699,10 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
         schema,
         async (message) => {
           await appendDebug(debug, MSG.generate_ai_draft, message);
-        }
+        },
+        signal
       );
+      throwIfAborted(signal);
       const draftWithWarnings = {
         ...ai.draft,
         warnings: [...ai.draft.warnings || [], ...ai.warnings]
@@ -14516,12 +14713,21 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
         MSG.generate_ai_draft,
         `AI draft ready: ${draftWithWarnings.shopee.images.length} image refs, ${draftWithWarnings.shopee.modelList?.length || 0} model(s)`
       );
+      throwIfAborted(signal);
       await appendDebug(debug, MSG.apply_shopee_draft, "Applying draft into Shopee form");
+      await waitForTabComplete(shopeeTab.id);
       const report = await applyDraftToShopeeTab(shopeeTab.id, fb, draftWithWarnings);
+      const reportDetails = [
+        `success=[${report.successFields.join(",")}]`,
+        report.failedFields.length ? `failed=[${report.failedFields.join(",")}]` : "",
+        report.skippedFields.length ? `skipped=[${report.skippedFields.join(",")}]` : "",
+        report.warnings.length ? `warnings: ${report.warnings.slice(0, 3).join("; ")}` : "",
+        report.pendingActions.length ? `pending: ${report.pendingActions.slice(0, 3).join("; ")}` : ""
+      ].filter(Boolean).join(" | ");
       await appendDebug(
         debug,
         MSG.apply_shopee_draft,
-        `Autofill finished: ${report.successFields.length} success, ${report.failedFields.length} failed`
+        `Autofill finished: ${report.successFields.length} success, ${report.failedFields.length} failed | ${reportDetails}`
       );
       await appendDebug(debug, "completed", "Pipeline completed");
       await finalizeDebug(debug, true);
@@ -14532,10 +14738,19 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
         report
       };
     } catch (error48) {
+      if (error48 instanceof PipelineCancelledError) {
+        await appendDebug(debug, "cancelled", "Pipeline cancelled by user");
+        debug.cancelled = true;
+        await finalizeDebug(debug, false, "Cancelled");
+        throw error48;
+      }
       const message = pickErrorMessage(error48);
       await appendDebug(debug, "failed", message, "error");
       await finalizeDebug(debug, false, message);
       throw error48;
+    } finally {
+      pipelineAbortController = null;
+      keepalive.stop();
     }
   }
   chrome.runtime.onInstalled.addListener(async () => {
@@ -14604,6 +14819,15 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
               url: tab.url || SHOPEE_NEW_PRODUCT_URL
             }
           });
+          return;
+        }
+        if (message.type === MSG.cancel_pipeline) {
+          if (pipelineAbortController) {
+            pipelineAbortController.abort();
+            sendResponse({ ok: true });
+          } else {
+            sendResponse({ ok: false, error: "No pipeline running" });
+          }
           return;
         }
         if (message.type === MSG.run_pipeline) {

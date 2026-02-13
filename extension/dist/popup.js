@@ -9,6 +9,7 @@
     get_fill_report: "get_fill_report",
     get_pipeline_debug: "get_pipeline_debug",
     run_pipeline: "run_pipeline",
+    cancel_pipeline: "cancel_pipeline",
     open_shopee_tab: "open_shopee_tab"
   };
 
@@ -27,6 +28,7 @@
   var progressValueEl = document.getElementById("progressValue");
   var progressFillEl = document.getElementById("progressFill");
   var debugPollTimer = null;
+  var pipelineRunning = false;
   function renderImagePreview(urls) {
     imageGridEl.innerHTML = "";
     if (!urls.length) {
@@ -58,8 +60,21 @@
     }
   }
   function setBusy(busy) {
-    for (const btn of [runBtn, collectBtn, openShopeeBtn, openOptionsBtn]) {
-      btn.disabled = busy;
+    pipelineRunning = busy;
+    if (busy) {
+      runBtn.textContent = "\u23F9 \u505C\u6B62";
+      runBtn.classList.add("stop");
+      runBtn.disabled = false;
+      for (const btn of [collectBtn, openShopeeBtn, openOptionsBtn]) {
+        btn.disabled = true;
+      }
+    } else {
+      runBtn.textContent = "Run One-Click";
+      runBtn.classList.remove("stop");
+      runBtn.disabled = false;
+      for (const btn of [collectBtn, openShopeeBtn, openOptionsBtn]) {
+        btn.disabled = false;
+      }
     }
   }
   function setStatus(text) {
@@ -98,6 +113,8 @@
         return "\u5B8C\u6210";
       case "failed":
         return "\u5931\u6557";
+      case "cancelled":
+        return "\u5DF2\u53D6\u6D88";
       default:
         return stage;
     }
@@ -179,7 +196,7 @@
         return;
       }
       const payload = result.payload;
-      const statusLabel = !payload.endedAtISO ? "RUNNING" : payload.ok ? "OK" : "FAILED";
+      const statusLabel = !payload.endedAtISO ? "RUNNING" : payload.cancelled ? "CANCELLED" : payload.ok ? "OK" : "FAILED";
       const header = [
         `Run: ${payload.runId}`,
         `Stage: ${payload.currentStage}`,
@@ -229,6 +246,17 @@ ${recentEvents || "No events."}`;
       debugPollTimer = null;
     }
   }
+  async function cancelPipeline() {
+    setStatus("Cancelling...");
+    try {
+      const result = await sendMessage({ type: MSG.cancel_pipeline });
+      if (!result.ok) {
+        setStatus("Cancel failed: " + (result.error ?? "unknown"));
+      }
+    } catch {
+      setStatus("Cancel request failed");
+    }
+  }
   async function runPipeline() {
     setBusy(true);
     setStatus("Running: FB collect \u2192 schema \u2192 AI draft \u2192 Shopee autofill...");
@@ -249,18 +277,23 @@ ${recentEvents || "No events."}`;
           `Pending actions: ${pendingCount}`
         ].join("\n")
       );
-      setMeta(
-        [
-          `FB images: ${fb.imageUrlsOrdered.length}`,
-          `Draft images: ${draft.shopee.images.length}`,
-          `Category: ${draft.shopee.categoryPath.join(" > ")}`,
-          `Duration: ${report.durationMs} ms`
-        ].join(" | ")
-      );
+      const metaParts = [
+        `FB images: ${fb.imageUrlsOrdered.length}`,
+        `Draft images: ${draft.shopee.images.length}`,
+        `Category: ${draft.shopee.categoryPath.join(" > ")}`,
+        `Duration: ${report.durationMs} ms`
+      ];
+      const boundCount = draft.variantImageBindings.length;
+      const pendingCount2 = draft.pendingVariantImageBindings.length;
+      if (boundCount > 0 || pendingCount2 > 0) {
+        metaParts.push(`Variant images: ${boundCount} bound, ${pendingCount2} pending`);
+      }
+      setMeta(metaParts.join(" | "));
       renderImagePreview(fb.imageUrlsOrdered);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Pipeline execution failed";
-      setStatus(`Error: ${message}`);
+      const isCancelled = message.includes("cancelled") || message.includes("Cancelled");
+      setStatus(isCancelled ? "Pipeline cancelled by user." : `Error: ${message}`);
       setMeta("");
     } finally {
       stopDebugPolling();
@@ -309,7 +342,11 @@ ${recentEvents || "No events."}`;
   }
   function bindEvents() {
     runBtn.addEventListener("click", () => {
-      void runPipeline();
+      if (pipelineRunning) {
+        void cancelPipeline();
+      } else {
+        void runPipeline();
+      }
     });
     collectBtn.addEventListener("click", () => {
       void collectFbOnly();

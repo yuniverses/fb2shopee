@@ -1,4 +1,5 @@
 import type {
+  CancelPipelineResponse,
   CollectFbPostResponse,
   GetPipelineDebugResponse,
   OpenShopeeTabResponse,
@@ -20,6 +21,7 @@ const progressLabelEl = document.getElementById('progressLabel') as HTMLSpanElem
 const progressValueEl = document.getElementById('progressValue') as HTMLSpanElement;
 const progressFillEl = document.getElementById('progressFill') as HTMLDivElement;
 let debugPollTimer: number | null = null;
+let pipelineRunning = false;
 
 function renderImagePreview(urls: string[]): void {
   imageGridEl.innerHTML = '';
@@ -56,8 +58,24 @@ function renderImagePreview(urls: string[]): void {
 }
 
 function setBusy(busy: boolean): void {
-  for (const btn of [runBtn, collectBtn, openShopeeBtn, openOptionsBtn]) {
-    btn.disabled = busy;
+  pipelineRunning = busy;
+  if (busy) {
+    // Run button becomes a stop button (red, stays enabled)
+    runBtn.textContent = '\u23F9 \u505C\u6B62';
+    runBtn.classList.add('stop');
+    runBtn.disabled = false;
+    // Disable other buttons
+    for (const btn of [collectBtn, openShopeeBtn, openOptionsBtn]) {
+      btn.disabled = true;
+    }
+  } else {
+    // Restore run button
+    runBtn.textContent = 'Run One-Click';
+    runBtn.classList.remove('stop');
+    runBtn.disabled = false;
+    for (const btn of [collectBtn, openShopeeBtn, openOptionsBtn]) {
+      btn.disabled = false;
+    }
   }
 }
 
@@ -101,6 +119,8 @@ function stageToLabel(stage: string): string {
       return '完成';
     case 'failed':
       return '失敗';
+    case 'cancelled':
+      return '已取消';
     default:
       return stage;
   }
@@ -197,7 +217,13 @@ async function refreshDebugPanel(): Promise<void> {
     }
 
     const payload = result.payload;
-    const statusLabel = !payload.endedAtISO ? 'RUNNING' : payload.ok ? 'OK' : 'FAILED';
+    const statusLabel = !payload.endedAtISO
+      ? 'RUNNING'
+      : payload.cancelled
+        ? 'CANCELLED'
+        : payload.ok
+          ? 'OK'
+          : 'FAILED';
     const header = [
       `Run: ${payload.runId}`,
       `Stage: ${payload.currentStage}`,
@@ -258,6 +284,19 @@ function stopDebugPolling(): void {
   }
 }
 
+async function cancelPipeline(): Promise<void> {
+  setStatus('Cancelling...');
+  try {
+    const result = await sendMessage<CancelPipelineResponse>({ type: MSG.cancel_pipeline });
+    if (!result.ok) {
+      setStatus('Cancel failed: ' + (result.error ?? 'unknown'));
+    }
+    // The runPipeline() promise will resolve/reject and handle cleanup
+  } catch {
+    setStatus('Cancel request failed');
+  }
+}
+
 async function runPipeline(): Promise<void> {
   setBusy(true);
   setStatus('Running: FB collect → schema → AI draft → Shopee autofill...');
@@ -282,18 +321,26 @@ async function runPipeline(): Promise<void> {
       ].join('\n')
     );
 
-    setMeta(
-      [
-        `FB images: ${fb.imageUrlsOrdered.length}`,
-        `Draft images: ${draft.shopee.images.length}`,
-        `Category: ${draft.shopee.categoryPath.join(' > ')}`,
-        `Duration: ${report.durationMs} ms`
-      ].join(' | ')
-    );
+    const metaParts = [
+      `FB images: ${fb.imageUrlsOrdered.length}`,
+      `Draft images: ${draft.shopee.images.length}`,
+      `Category: ${draft.shopee.categoryPath.join(' > ')}`,
+      `Duration: ${report.durationMs} ms`
+    ];
+
+    // Variant image binding stats (F2)
+    const boundCount = draft.variantImageBindings.length;
+    const pendingCount2 = draft.pendingVariantImageBindings.length;
+    if (boundCount > 0 || pendingCount2 > 0) {
+      metaParts.push(`Variant images: ${boundCount} bound, ${pendingCount2} pending`);
+    }
+
+    setMeta(metaParts.join(' | '));
     renderImagePreview(fb.imageUrlsOrdered);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Pipeline execution failed';
-    setStatus(`Error: ${message}`);
+    const isCancelled = message.includes('cancelled') || message.includes('Cancelled');
+    setStatus(isCancelled ? 'Pipeline cancelled by user.' : `Error: ${message}`);
     setMeta('');
   } finally {
     stopDebugPolling();
@@ -349,7 +396,11 @@ async function openShopeeTab(): Promise<void> {
 
 function bindEvents(): void {
   runBtn.addEventListener('click', () => {
-    void runPipeline();
+    if (pipelineRunning) {
+      void cancelPipeline();
+    } else {
+      void runPipeline();
+    }
   });
 
   collectBtn.addEventListener('click', () => {
